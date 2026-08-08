@@ -1,0 +1,34 @@
+{
+  "whatsapp": {
+    "group_name": "hgxd",
+    "chrome_profile_path": "C:\\WhatsAppSignalBot\\chrome-profile",
+    "poll_interval_seconds": 2,
+    "headless": false,
+    "max_messages_per_scan": 20
+  },
+  "signal_file": {
+    "output_path": "C:\\Users\\noman\\OneDrive\\Desktop\\testbot\\signals.txt",
+    "temp_suffix": ".tmp",
+    "max_signals_in_file": 50,
+    "encoding": "cp1252"
+  },
+  "parser": {
+    "symbol_aliases": ["XAUUSD", "GOLD", "XAU/USD", "XAU", "GOLD SPOT"],
+    "default_symbol": "XAUUSD",
+    "ignore_case": true,
+    "min_confidence": 0.4,
+    "pip_value": 1.0
+  },
+  "logging": {
+    "level": "INFO",
+    "log_file": "C:\\WhatsAppSignalBot\\signal_bridge.log",
+    "max_log_size_mb": 10,
+    "backup_count": 3
+  },
+  "ai_parser": {
+    "enabled": true,
+    "api_key": "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",
+    "model": "llama-3.3-70b-versatile",
+    "base_url": "https://api.groq.com/openai/v1"
+  }
+}
