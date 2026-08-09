@@ -186,14 +186,19 @@ class WhatsAppMonitor:
         ai_config = config.get("ai_parser", {})
         if self.parser_enabled:
             if ai_config.get("enabled", False) and AI_AVAILABLE and ai_config.get("api_key", "") not in ("", "YOUR_GROQ_API_KEY_HERE"):
-                self.parser = AISignalParser(
-                    api_key=ai_config.get("api_key", "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"),
-                    model=ai_config.get("model", "llama-3.3-70b-versatile"),
-                    base_url=ai_config.get("base_url", "https://api.groq.com/openai/v1"),
-                    fallback_parser=regex_parser,
-                )
-                self.parser_source = "AI"
-                logger.info("Using AI-powered parser (with regex fallback)")
+                try:
+                    self.parser = AISignalParser(
+                        api_key=ai_config.get("api_key", "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"),
+                        model=ai_config.get("model", "llama-3.3-70b-versatile"),
+                        base_url=ai_config.get("base_url", "https://api.groq.com/openai/v1"),
+                        fallback_parser=regex_parser,
+                    )
+                    self.parser_source = "AI"
+                    logger.info("Using AI-powered parser (with regex fallback)")
+                except Exception as exc:
+                    self.parser = regex_parser
+                    self.parser_source = "regex"
+                    logger.error("Failed to initialize AI parser; falling back to regex parser.", exc_info=True)
             else:
                 self.parser = regex_parser
                 self.parser_source = "regex"
@@ -638,10 +643,13 @@ class WhatsAppMonitor:
                 except (NoSuchElementException, StaleElementReferenceException):
                     pass
 
+                message_id = elem.get_attribute("data-id") or elem.get_attribute("id") or ""
+
                 messages.append({
                     "text": text,
                     "sender": sender,
                     "timestamp": datetime.now().isoformat(),
+                    "message_id": message_id,
                 })
 
             except StaleElementReferenceException:
@@ -653,8 +661,11 @@ class WhatsAppMonitor:
         return messages
 
     def _message_hash(self, msg: dict) -> str:
-        """Create a hash for deduplication using text, sender, and timestamp."""
-        content = f"{msg.get('sender', '')}:{msg.get('text', '')}:{msg.get('timestamp', '')}"
+        """Create a stable hash for deduplication using message ID or sender/text."""
+        if msg.get("message_id"):
+            content = msg["message_id"]
+        else:
+            content = f"{msg.get('sender', '')}:{msg.get('text', '')}"
         return hashlib.md5(content.encode("utf-8")).hexdigest()
 
     # ------------------------------------------------------------------
@@ -683,6 +694,8 @@ class WhatsAppMonitor:
                     if h not in self._seen_message_hashes:
                         self._seen_message_hashes.add(h)
                         new_messages.append(msg)
+                    else:
+                        logger.debug(f"Skipping duplicate visible message from {msg.get('sender','unknown')}: {msg.get('text','')[:80]}")
 
                 if new_messages:
                     logger.info(f"Found {len(new_messages)} new message(s)")
@@ -691,11 +704,20 @@ class WhatsAppMonitor:
                         logger.info(f"New message from {msg['sender'] or 'unknown'}: {msg['text'][:100]}")
                         logger.info(f"Parsing with {self.parser_source} parser")
 
-                        if not self.parser_enabled:
-                            logger.info("Parser is disabled, skipping message parsing.")
+                        if self.parser is None:
+                            logger.info("No parser configured, skipping message parsing.")
                             continue
 
-                        signal = self.parser.parse(msg["text"], msg.get("sender", ""))
+                        try:
+                            signal = self.parser.parse(msg["text"], msg.get("sender", ""))
+                        except Exception as exc:
+                            logger.error("Parser failed to parse message.", exc_info=True)
+                            if self.parser_source == "AI":
+                                logger.error("AI parser failure detected. Check API connectivity, key, model, or base URL settings.")
+                            continue
+
+                        if signal is None and self.parser_source == "AI":
+                            logger.warning("AI parser returned no signal for this message. This may indicate a low-confidence result or an issue with the AI/parser configuration.")
 
                         if signal:
                             logger.info(f"Signal detected: {signal.side} {signal.symbol} "

@@ -483,11 +483,14 @@ class SignalParser:
             logger.debug(f"Rejected (no SL/TP): {raw[:80]}")
             return None
 
-        # Generate unique signal ID
-        timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+        # Generate deterministic signal ID from sender and raw text so repeated
+        # parsing of the same message does not create duplicate signals.
         import hashlib
-        msg_hash = hashlib.md5(raw.encode("utf-8")).hexdigest()[:8]
-        signal_id = f"{timestamp}_{msg_hash}"
+        msg_hash = hashlib.md5(f"{sender}:{raw}".encode("utf-8")).hexdigest()[:16]
+        signal_id = msg_hash
+
+        # Timestamp for the parsed signal (used in output and serialization)
+        timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
 
         signal = TradeSignal(
             signal_id=signal_id,

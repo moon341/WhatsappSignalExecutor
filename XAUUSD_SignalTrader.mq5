@@ -31,7 +31,7 @@ input int      MaxOpenPositions   = 3;       // Max simultaneous positions from 
 input bool     CloseOnOppositeSignal = true;  // Close positions on opposite signal
 
 input group "=== Signal File ==="
-input string   SignalFileName    = "signals.txt"; // Signal file name (in MQL5/Files/)
+input string   SignalFileName    = "C:\Users\noman\OneDrive\Desktop\testbot\signals.txt"; // Signal file name (in MQL5/Files/)
 input int      PollIntervalMs     = 1000;     // How often to check for new signals (ms)
 
 input group "=== Take Profit Settings ==="
@@ -64,28 +64,68 @@ CSymbolInfo    symInfo;
 string         g_lastProcessedID = "";
 datetime       g_lastCheckTime   = 0;
 int            g_totalTrades     = 0;
+string         g_activeSymbol    = "";
 
 //+------------------------------------------------------------------+
 //| Expert initialization                                            |
 //+------------------------------------------------------------------+
 int OnInit()
 {
+    Print("ENTER: OnInit() - initializing expert");
     trade.SetExpertMagicNumber(MagicNumber);
     trade.SetDeviationInPoints(Slippage);
 
-    // Use symbol-appropriate filling mode
-    if(!trade.SetTypeFillingBySymbol(TradingSymbol))
-        Print("WARNING: Could not set filling mode by symbol. Using default.");
-
-    if(!symInfo.Name(TradingSymbol))
+    // Determine active symbol (don't modify the input `TradingSymbol` constant)
+    g_activeSymbol = TradingSymbol;
+    // If the configured symbol is not known, try the current chart symbol
+    if(!symInfo.Name(g_activeSymbol))
     {
-        Print("ERROR: Symbol '", TradingSymbol, "' not found!");
-        return INIT_FAILED;
+        Print("ERROR: Configured symbol '", g_activeSymbol, "' not found in Market Watch.");
+        string chartSym = Symbol();
+        Print("Attempting to use current chart symbol: ", chartSym);
+        if(symInfo.Name(chartSym))
+        {
+            g_activeSymbol = chartSym;
+            Print("Using chart symbol: ", g_activeSymbol);
+        }
+        else
+        {
+            Print("ERROR: Neither configured symbol nor chart symbol are available. Add symbol to Market Watch or set the `TradingSymbol` input to your broker's symbol name.");
+            return INIT_FAILED;
+        }
     }
+
+    // Ensure trade filling mode matches the active symbol
+    if(!trade.SetTypeFillingBySymbol(g_activeSymbol))
+        Print("WARNING: Could not set filling mode for symbol ", g_activeSymbol, ". Using default.");
+
+    // Initialization diagnostics
+    Print("INIT DIAGNOSTICS:");
+    Print("  Configured TradingSymbol: ", TradingSymbol);
+    Print("  Resolved Active Symbol: ", g_activeSymbol);
+    Print("  SignalFileName: ", SignalFileName);
+    bool fileExists = FileIsExist(SignalFileName);
+    Print("  Signal file exists (FileIsExist): ", fileExists);
+    if(fileExists)
+    {
+        int fh = FileOpen(SignalFileName, FILE_READ | FILE_TXT | FILE_ANSI);
+        if(fh == INVALID_HANDLE)
+            Print("  Signal file cannot be opened. GetLastError(): ", GetLastError());
+        else
+        {
+            Print("  Signal file opened successfully.");
+            FileClose(fh);
+        }
+    }
+    Print("  Account balance: ", AccountInfoDouble(ACCOUNT_BALANCE), "  Equity: ", AccountInfoDouble(ACCOUNT_EQUITY));
+    Print("  Server time (TimeCurrent): ", TimeCurrent());
+    // Visible notifications for quick debugging
+    Alert("XAUUSD_SignalTrader: INIT completed. Active symbol= " , g_activeSymbol);
+    Comment("XAUUSD_SignalTrader active: " + g_activeSymbol + " - see Experts tab for details.");
 
     Print("========================================");
     Print("XAUUSD Signal Trader v2.00");
-    Print("  Symbol:         ", TradingSymbol);
+    Print("  Symbol:         ", g_activeSymbol);
     Print("  Signal File:    ", SignalFileName);
     Print("  EnableTrading:  ", EnableTrading);
     Print("  LotSize:        ", LotSize);
@@ -111,6 +151,7 @@ int OnInit()
 //+------------------------------------------------------------------+
 void OnDeinit(const int reason)
 {
+    Print("ENTER: OnDeinit() - reason=", reason);
     Print("Signal Trader stopped. Total trades executed: ", g_totalTrades);
 }
 
@@ -119,6 +160,7 @@ void OnDeinit(const int reason)
 //+------------------------------------------------------------------+
 void OnTick()
 {
+    Print("ENTER: OnTick() - checking for signals. lastProcessedID=", g_lastProcessedID);
     datetime now = TimeCurrent();
     if(now - g_lastCheckTime < PollIntervalMs / 1000)
         return;
@@ -150,6 +192,7 @@ void OnTick()
     // Read signal file
     string signals[];
     int count = ReadSignalFile(signals);
+    Print("ReadSignalFile returned count=", count);
     if(count == 0)
         return;
 
@@ -216,6 +259,8 @@ int ReadSignalFile(string &lines[])
 {
     string filePath = SignalFileName;
 
+    Print("ENTER: ReadSignalFile() - opening file: ", filePath);
+
     if(!FileIsExist(filePath))
         return 0;
 
@@ -251,6 +296,7 @@ int ReadSignalFile(string &lines[])
 //+------------------------------------------------------------------+
 string ReadLastSignalID()
 {
+    Print("ENTER: ReadLastSignalID() - scanning file for last ID");
     string lines[];
     int count = ReadSignalFile(lines);
     if(count == 0)
@@ -269,6 +315,9 @@ string ReadLastSignalID()
 //+------------------------------------------------------------------+
 void ProcessSignal(string &parts[], int numParts)
 {
+    Print("ENTER: ProcessSignal() - received parts count=", numParts);
+    if(numParts > 0)
+        Print("  incoming signal id=", parts[0]);
     string signalID  = parts[0];
     string timestamp = parts[1];
     string symbol    = parts[2];
@@ -287,7 +336,7 @@ void ProcessSignal(string &parts[], int numParts)
         rawText = parts[13];
 
     // Validate symbol
-    if(symbol != TradingSymbol && symbol != "XAUUSD" && symbol != "GOLD")
+    if(symbol != g_activeSymbol && symbol != "XAUUSD" && symbol != "GOLD")
     {
         Print("Skipping signal - wrong symbol: ", symbol);
         return;
@@ -373,6 +422,8 @@ void ExecuteSignal(bool isBuy, string entryType, double entryMin, double entryMa
                    double sl, string slType, double &tpValues[], string tpType,
                    bool moveBE, string signalID)
 {
+    Print("ENTER: ExecuteSignal() - id=", signalID, " isBuy=", isBuy, " entryType=", entryType,
+          " entryMin=", entryMin, " entryMax=", entryMax, " sl=", sl, " slType=", slType);
     double currentPrice = isBuy ? symInfo.Ask() : symInfo.Bid();
     double point = symInfo.Point();
     double pip = PipValue; // 1 pip = PipValue price units
@@ -581,17 +632,17 @@ void ExecuteSignal(bool isBuy, string entryType, double entryMin, double entryMa
     {
         // Place pending limit order
         if(isBuy)
-            result = trade.BuyLimit(lots, entryPrice, TradingSymbol, slPrice, primaryTP, ORDER_TIME_GTC, 0, "WhatsApp Signal");
+            result = trade.BuyLimit(lots, entryPrice, g_activeSymbol, slPrice, primaryTP, ORDER_TIME_GTC, 0, "WhatsApp Signal");
         else
-            result = trade.SellLimit(lots, entryPrice, TradingSymbol, slPrice, primaryTP, ORDER_TIME_GTC, 0, "WhatsApp Signal");
+            result = trade.SellLimit(lots, entryPrice, g_activeSymbol, slPrice, primaryTP, ORDER_TIME_GTC, 0, "WhatsApp Signal");
     }
     else
     {
         // Market order
         if(isBuy)
-            result = trade.Buy(lots, TradingSymbol, entryPrice, slPrice, primaryTP, "WhatsApp Signal");
+            result = trade.Buy(lots, g_activeSymbol, entryPrice, slPrice, primaryTP, "WhatsApp Signal");
         else
-            result = trade.Sell(lots, TradingSymbol, entryPrice, slPrice, primaryTP, "WhatsApp Signal");
+            result = trade.Sell(lots, g_activeSymbol, entryPrice, slPrice, primaryTP, "WhatsApp Signal");
     }
 
     if(result)
@@ -618,8 +669,8 @@ double CalculateLotSize(double entryPrice, double slPrice)
     double riskAmount = balance * RiskPercent / 100.0;
 
     double slDistance = MathAbs(entryPrice - slPrice);
-    double tickValue = SymbolInfoDouble(TradingSymbol, SYMBOL_TRADE_TICK_VALUE);
-    double tickSize = SymbolInfoDouble(TradingSymbol, SYMBOL_TRADE_TICK_SIZE);
+    double tickValue = SymbolInfoDouble(g_activeSymbol, SYMBOL_TRADE_TICK_VALUE);
+    double tickSize = SymbolInfoDouble(g_activeSymbol, SYMBOL_TRADE_TICK_SIZE);
 
     if(tickSize <= 0 || tickValue <= 0)
         return LotSize;
@@ -639,12 +690,13 @@ double CalculateLotSize(double entryPrice, double slPrice)
 //+------------------------------------------------------------------+
 void ManageBreakEven()
 {
+    Print("ENTER: ManageBreakEven() - checking positions for BE adjustments");
     for(int i = PositionsTotal() - 1; i >= 0; i--)
     {
         if(!posInfo.SelectByIndex(i))
             continue;
 
-        if(posInfo.Magic() != MagicNumber || posInfo.Symbol() != TradingSymbol)
+        if(posInfo.Magic() != MagicNumber || posInfo.Symbol() != g_activeSymbol)
             continue;
 
         ulong ticket = posInfo.Ticket();
@@ -694,12 +746,13 @@ void ManageBreakEven()
 //+------------------------------------------------------------------+
 int CountSignalPositions()
 {
+    Print("ENTER: CountSignalPositions() - counting EA positions (Magic=", MagicNumber, ")");
     int count = 0;
     for(int i = PositionsTotal() - 1; i >= 0; i--)
     {
         if(posInfo.SelectByIndex(i))
         {
-            if(posInfo.Magic() == MagicNumber && posInfo.Symbol() == TradingSymbol)
+            if(posInfo.Magic() == MagicNumber && posInfo.Symbol() == g_activeSymbol)
                 count++;
         }
     }
@@ -711,12 +764,13 @@ int CountSignalPositions()
 //+------------------------------------------------------------------+
 void CloseOppositePositions(bool isBuySignal)
 {
+    Print("ENTER: CloseOppositePositions() - isBuySignal=", isBuySignal);
     for(int i = PositionsTotal() - 1; i >= 0; i--)
     {
         if(!posInfo.SelectByIndex(i))
             continue;
 
-        if(posInfo.Magic() != MagicNumber || posInfo.Symbol() != TradingSymbol)
+        if(posInfo.Magic() != MagicNumber || posInfo.Symbol() != g_activeSymbol)
             continue;
 
         bool isBuyPos = (posInfo.PositionType() == POSITION_TYPE_BUY);
@@ -735,6 +789,7 @@ void CloseOppositePositions(bool isBuySignal)
 //+------------------------------------------------------------------+
 bool IsWithinTradingHours()
 {
+    Print("ENTER: IsWithinTradingHours() - validating trading hours [", TradingStartHour, "-", TradingEndHour, "]");
     MqlDateTime dt;
     TimeToStruct(TimeCurrent(), dt);
     if(dt.hour < TradingStartHour || dt.hour >= TradingEndHour)
@@ -747,6 +802,7 @@ bool IsWithinTradingHours()
 //+------------------------------------------------------------------+
 bool IsMaxDrawdownExceeded()
 {
+    Print("ENTER: IsMaxDrawdownExceeded() - computing drawdown against MaxDrawdownPercent=", MaxDrawdownPercent);
     double balance = AccountInfoDouble(ACCOUNT_BALANCE);
     double equity = AccountInfoDouble(ACCOUNT_EQUITY);
 
