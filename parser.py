@@ -66,13 +66,43 @@ class TradeSignal:
             "raw_text": self.raw_text,
         }
 
+    def _pips_to_price(self, pip_value: float, *, is_stop_loss: bool) -> float:
+        """Convert a pip-based value to its absolute price for the written signal file."""
+        if pip_value == 0:
+            return 0.0
+
+        base_price = self.entry_min if self.side == "BUY" else self.entry_max
+        if not base_price:
+            base_price = self.entry_min or self.entry_max
+        if not base_price:
+            return pip_value
+
+        if self.side == "BUY":
+            return base_price - pip_value if is_stop_loss else base_price + pip_value
+        return base_price + pip_value if is_stop_loss else base_price - pip_value
+
     def to_pipe_string(self):
         """Serialize to pipe-delimited format for MT5 EA consumption.
 
         Format:
             id|timestamp|symbol|side|entry_type|entry_min|entry_max|sl|sl_type|tps|tp_type|move_to_be|confidence|raw_text
         """
-        tp_str = "/".join(str(tp) for tp in self.take_profits)
+        sl_value = self.stop_loss
+        sl_type = self.sl_type
+        if self.sl_type.upper() == "PIPS":
+            sl_value = self._pips_to_price(self.stop_loss, is_stop_loss=True)
+            sl_type = "PRICE"
+
+        tp_values = list(self.take_profits)
+        tp_type = self.tp_type
+        if self.tp_type.upper() == "PIPS":
+            tp_values = [
+                self._pips_to_price(tp, is_stop_loss=False) if tp != 0 else 0.0
+                for tp in self.take_profits
+            ]
+            tp_type = "PRICE"
+
+        tp_str = "/".join(f"{tp:.5f}" if tp != 0 else "0.00000" for tp in tp_values)
         parts = [
             self.signal_id,
             self.timestamp,
@@ -81,10 +111,10 @@ class TradeSignal:
             self.entry_type,
             f"{self.entry_min:.5f}",
             f"{self.entry_max:.5f}",
-            f"{self.stop_loss:.5f}",
-            self.sl_type,
-            tp_str if tp_str else "0",
-            self.tp_type,
+            f"{sl_value:.5f}",
+            sl_type,
+            tp_str if tp_str else "0.00000",
+            tp_type,
             "1" if self.move_to_be else "0",
             f"{self.confidence:.2f}",
             self.raw_text.replace("|", "/").replace("\n", " ")[:300],

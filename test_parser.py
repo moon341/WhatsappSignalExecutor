@@ -183,6 +183,33 @@ def test_no_side_rejected():
     print("PASS: test_no_side_rejected")
 
 
+def test_pips_are_converted_to_prices_in_pipe_output():
+    """Pip values should be converted to absolute prices before MT5 file output."""
+    sig = TradeSignal(
+        signal_id="abc123",
+        timestamp="20240101120000",
+        symbol="XAUUSD",
+        side="BUY",
+        entry_type="LIMIT",
+        entry_min=4168.0,
+        entry_max=4172.0,
+        stop_loss=40.0,
+        sl_type="PIPS",
+        take_profits=[90.0, 130.0, 0.0],
+        tp_type="PIPS",
+        move_to_be=True,
+        confidence=0.95,
+        raw_text="BUY LIMIT:4168-4172 SL:40 pips TP1 90 PIPS TP2 130 PIPS TP3 OPEN",
+    )
+    pipe = sig.to_pipe_string()
+    assert "|" in pipe
+    assert "4128.00000" in pipe
+    assert "4258.00000" in pipe
+    assert "4298.00000" in pipe
+    assert "PRICE" in pipe
+    print("PASS: test_pips_are_converted_to_prices_in_pipe_output")
+
+
 def test_pipe_serialization():
     """Test pipe serialization/deserialization."""
     sig = TradeSignal(
@@ -210,10 +237,12 @@ def test_pipe_serialization():
     assert restored.entry_type == "LIMIT"
     assert restored.entry_min == 4325.50
     assert restored.entry_max == 4328.0
-    assert restored.stop_loss == 40.0
-    assert restored.sl_type == "PIPS"
-    assert restored.tp_type == "PIPS"
+    assert restored.stop_loss == 4285.50
+    assert restored.sl_type == "PRICE"
+    assert restored.tp_type == "PRICE"
     assert len(restored.take_profits) == 3
+    assert restored.take_profits[0] == 4415.50
+    assert restored.take_profits[1] == 4455.50
     assert restored.take_profits[2] == 0.0  # OPEN
     assert restored.move_to_be == True
     print("PASS: test_pipe_serialization")
@@ -414,6 +443,7 @@ if __name__ == "__main__":
     test_decimal_prices()
     test_no_signal()
     test_no_side_rejected()
+    test_pips_are_converted_to_prices_in_pipe_output()
     test_pipe_serialization()
     test_long_short_synonyms()
     test_market_order_no_entry()
