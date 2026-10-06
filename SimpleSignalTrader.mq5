@@ -16,6 +16,30 @@ input int    PollSeconds     = 1;              // check every second
 
 CTrade trade;
 string  g_lastFileContent = "";
+string  g_processedSignalIds[];
+
+bool IsSignalAlreadyProcessed(const string signalId)
+{
+   for(int i = 0; i < ArraySize(g_processedSignalIds); i++)
+   {
+      if(g_processedSignalIds[i] == signalId)
+         return(true);
+   }
+   return(false);
+}
+
+void MarkSignalProcessed(const string signalId)
+{
+   if(StringLen(signalId) == 0)
+      return;
+
+   if(IsSignalAlreadyProcessed(signalId))
+      return;
+
+   int size = ArraySize(g_processedSignalIds);
+   ArrayResize(g_processedSignalIds, size + 1);
+   g_processedSignalIds[size] = signalId;
+}
 
 //+------------------------------------------------------------------+
 int OnInit()
@@ -130,19 +154,19 @@ void ProcessSignalLine(const string line)
    StringTrimLeft(side);
    StringTrimRight(side);
 
-   Print("DEBUG side=", side, " len=", StringLen(side));
+   //Print("DEBUG side=", side, " len=", StringLen(side));
    for(int i = 0; i < StringLen(side); i++)
    {
       int ch = StringGetCharacter(side, i);
-      Print("char[", i, "] = ", ch);
+      //Print("char[", i, "] = ", ch);
    }
-   Print("DEBUG CHECK side=", side, " upper=", StringToUpper(side), " rawLine=", line);
+   //Print("DEBUG CHECK side=", side, " upper=", StringToUpper(side), " rawLine=", line);
 
    bool isBuy = (side == "BUY" || StringToUpper(side) == "LONG");
    bool isSell = (side == "SELL" || StringToUpper(side) == "SHORT");
    if(!isBuy && !isSell)
    {
-      Print("SimpleSignalTrader: invalid side -> ", side, " rawLine=", line);
+      //Print("SimpleSignalTrader: invalid side -> ", side, " rawLine=", line);
       return;
    }
 
@@ -151,7 +175,9 @@ void ProcessSignalLine(const string line)
    double entryMax = StringToDouble(parts[6]);
    double sl = StringToDouble(parts[7]);
    double tp = 0.0;
-
+   Print(parts[4],StringToUpper(parts[4]));
+   string entryType = parts[4];
+   Print(entryType);
    if(entryMin <= 0)
       entryMin = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    if(entryMax <= 0)
@@ -175,17 +201,45 @@ void ProcessSignalLine(const string line)
    if(tp <= 0)
       tp = entryMax;
 
-   double price = isBuy ? SymbolInfoDouble(_Symbol, SYMBOL_ASK) : SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   if(entryMin > 0)
+   double currentPrice = isBuy ? SymbolInfoDouble(_Symbol, SYMBOL_ASK) : SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double price = currentPrice;
+   bool isLimit = (entryType == "LIMIT");
+
+   if(entryMin > 0 && entryMax > 0 && isLimit)
+   {
+      if(isBuy)
+      {
+         if(currentPrice > entryMax)
+            price = entryMin;
+         else if(currentPrice >= entryMin && currentPrice <= entryMax)
+            price = entryMin;
+         else
+            price = entryMin;
+      }
+      else
+      {
+         if(currentPrice < entryMin)
+            price = entryMax;
+         else if(currentPrice >= entryMin && currentPrice <= entryMax)
+            price = entryMax;
+         else
+            price = entryMax;
+      }
+   }
+   else if(entryMin > 0)
+   {
       price = entryMin;
+   }
 
    Print("SimpleSignalTrader: signal -> signalId=", signalId,
          " symbol=", symbol,
          " side=", side,
+         " entryType=", entryType,
          " entryMin=", DoubleToString(entryMin, Digits()),
          " entryMax=", DoubleToString(entryMax, Digits()),
          " sl=", DoubleToString(sl, Digits()),
          " tp=", DoubleToString(tp, Digits()),
+         " orderPrice=", DoubleToString(price, Digits()),
          " volume=", DoubleToString(volume, 2));
 
    if(!EnableTrading)
@@ -194,15 +248,38 @@ void ProcessSignalLine(const string line)
       return;
    }
 
-   bool result = false;
-   if(isBuy)
-      result = trade.Buy(volume, _Symbol, price, sl, tp, "SimpleSignalTrader");
-   else
-      result = trade.Sell(volume, _Symbol, price, sl, tp, "SimpleSignalTrader");
+   if(IsSignalAlreadyProcessed(signalId))
+   {
+      Print("SimpleSignalTrader: already processed signalId=", signalId, " skipping duplicate.");
+      return;
+   }
 
+   bool result = false;
+   Print("trade type",isLimit,entryMin,entryMax);
+   if(isLimit && entryMin > 0 && entryMax > 0)
+   {
+      Print("if(isLimit && entryMin > 0 && entryMax > 0):true");
+      if(isBuy)
+         result = trade.BuyLimit(volume, price, _Symbol, sl, tp, ORDER_TIME_GTC, 0, "SimpleSignalTrader");
+      else
+         result = trade.SellLimit(volume, price, _Symbol, sl, tp, ORDER_TIME_GTC, 0, "SimpleSignalTrader");
+   }
+   //else if(isBuy)
+   //   {
+   //   Print("else if(isBuy)");
+   //   result = trade.Buy(volume, _Symbol, price, sl, tp, "SimpleSignalTrader");
+   //   }
+   //else
+   //   {
+   //   Print("else");
+   //   result = trade.Sell(volume, _Symbol, price, sl, tp, "SimpleSignalTrader");
+   //   }
    if(result)
+   {
+      MarkSignalProcessed(signalId);
       Print("SimpleSignalTrader: order placed successfully, ticket=", trade.ResultOrder(),
             " price=", DoubleToString(trade.ResultPrice(), Digits()));
+   }
    else
       Print("SimpleSignalTrader: order failed -> ", trade.ResultRetcode(), " comment=", trade.ResultComment());
 }

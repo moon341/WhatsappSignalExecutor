@@ -71,15 +71,16 @@ class TradeSignal:
         if pip_value == 0:
             return 0.0
 
+        pip_amount = pip_value * 0.01
         base_price = self.entry_min if self.side == "BUY" else self.entry_max
         if not base_price:
             base_price = self.entry_min or self.entry_max
         if not base_price:
-            return pip_value
+            return pip_amount
 
         if self.side == "BUY":
-            return base_price - pip_value if is_stop_loss else base_price + pip_value
-        return base_price + pip_value if is_stop_loss else base_price - pip_value
+            return base_price - pip_amount if is_stop_loss else base_price + pip_amount
+        return base_price + pip_amount if is_stop_loss else base_price - pip_amount
 
     def to_pipe_string(self):
         """Serialize to pipe-delimited format for MT5 EA consumption.

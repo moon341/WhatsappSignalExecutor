@@ -203,9 +203,9 @@ def test_pips_are_converted_to_prices_in_pipe_output():
     )
     pipe = sig.to_pipe_string()
     assert "|" in pipe
-    assert "4128.00000" in pipe
-    assert "4258.00000" in pipe
-    assert "4298.00000" in pipe
+    assert "4167.60000" in pipe
+    assert "4168.90000" in pipe
+    assert "4169.30000" in pipe
     assert "PRICE" in pipe
     print("PASS: test_pips_are_converted_to_prices_in_pipe_output")
 
