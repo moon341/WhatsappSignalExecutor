@@ -1,6 +1,7 @@
 {
   "whatsapp": {
     "group_name": "Profit Pulse",
+    "group_names": ["Profit Pulse","hgxd"],
     "chrome_profile_path": "C:\\WhatsAppSignalBot\\chrome-profile",
     "poll_interval_seconds": 2,
     "headless": false,

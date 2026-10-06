@@ -163,7 +163,20 @@ class WhatsAppMonitor:
     def __init__(self, config: dict):
         self.config = config
         wa_config = config["whatsapp"]
-        self.group_name = wa_config["group_name"]
+
+        group_names = wa_config.get("group_names")
+        if group_names is None:
+            group_names = wa_config.get("group_name")
+            if isinstance(group_names, str):
+                group_names = [group_names]
+            elif group_names is None:
+                group_names = []
+
+        if isinstance(group_names, str):
+            group_names = [group_names]
+
+        self.group_names = [str(name).strip() for name in group_names if str(name).strip()]
+        self.group_name = self.group_names[0] if self.group_names else ""
         self.chrome_profile_path = wa_config["chrome_profile_path"]
         self.poll_interval = wa_config.get("poll_interval_seconds", 2)
         self.headless = wa_config.get("headless", False)
@@ -491,9 +504,14 @@ class WhatsAppMonitor:
         logger.error("2. Delete the chrome-profile folder and run again")
         logger.error("3. Check your internet connection")
 
-    def _open_group_chat(self):
+    def _open_group_chat(self, group_name=None):
         """Open the specified group chat."""
-        logger.info(f"Opening group chat: {self.group_name}")
+        target_group = group_name or self.group_name
+        if not target_group:
+            logger.error("No WhatsApp group configured.")
+            return False
+
+        logger.info(f"Opening group chat: {target_group}")
 
         # Wait for chat list to be present
         chat_list_found = False
@@ -520,7 +538,7 @@ class WhatsAppMonitor:
         while not group_found and attempts < max_attempts:
             attempts += 1
             entries = self._find_elements_by_selectors(self.CHAT_ENTRY_SELECTORS)
-            logger.info(f"Found {len(entries)} chat entries. Searching for '{self.group_name}'...")
+            logger.info(f"Found {len(entries)} chat entries. Searching for '{target_group}'...")
 
             for entry in entries:
                 try:
@@ -528,7 +546,7 @@ class WhatsAppMonitor:
                         try:
                             title_elem = entry.find_element(By.CSS_SELECTOR, title_sel)
                             title = title_elem.get_attribute("title")
-                            if title and self.group_name.lower() in title.lower():
+                            if title and target_group.lower() in title.lower():
                                 # Scroll into view and click
                                 self.driver.execute_script("arguments[0].scrollIntoView(true);", entry)
                                 time.sleep(0.5)
@@ -558,7 +576,7 @@ class WhatsAppMonitor:
                             el.dispatchEvent(new Event('input', {bubbles: true}));
                         """, search_box)
                         # Type group name character by character
-                        for char in self.group_name:
+                        for char in target_group:
                             search_box.send_keys(char)
                             time.sleep(0.05)
                         time.sleep(3)
@@ -571,7 +589,7 @@ class WhatsAppMonitor:
                                     try:
                                         title_elem = entry.find_element(By.CSS_SELECTOR, title_sel)
                                         title = title_elem.get_attribute("title")
-                                        if title and self.group_name.lower() in title.lower():
+                                        if title and target_group.lower() in title.lower():
                                             entry.click()
                                             group_found = True
                                             logger.info(f"Found group via search: {title}")
@@ -593,7 +611,7 @@ class WhatsAppMonitor:
             time.sleep(1)
 
         if not group_found:
-            logger.error(f"Could not find group: {self.group_name}")
+            logger.error(f"Could not find group: {target_group}")
             logger.error("Make sure the group name in config.json matches exactly.")
             self._take_screenshot("group_not_found.png")
             return False
@@ -673,67 +691,82 @@ class WhatsAppMonitor:
     # ------------------------------------------------------------------
 
     def monitor_loop(self):
-        """Main loop: poll for new messages, parse, and write signals."""
+        """Main loop: poll for new messages in each configured group, parse, and write signals."""
         logger.info("Starting message monitoring loop...")
         logger.info(f"Polling every {self.poll_interval} seconds")
         logger.info(f"Signal file: {self.signal_output_path}")
+        logger.info(f"Monitoring groups: {', '.join(self.group_names) if self.group_names else 'NONE'}")
 
-        # Initialize seen messages with current visible messages (don't process old ones)
-        initial_messages = self._extract_messages()
-        for msg in initial_messages:
-            self._seen_message_hashes.add(self._message_hash(msg))
-        logger.info(f"Loaded {len(initial_messages)} existing messages as baseline (will not re-process).")
+        if not self.group_names:
+            logger.error("No WhatsApp groups configured. Add group_name or group_names to config.json.")
+            return
 
         while True:
             try:
-                messages = self._extract_messages()
+                for group_name in self.group_names:
+                    if not self._open_group_chat(group_name):
+                        logger.warning(f"Skipping group {group_name} because it could not be opened.")
+                        continue
 
-                new_messages = []
-                for msg in messages:
-                    h = self._message_hash(msg)
-                    if h not in self._seen_message_hashes:
-                        self._seen_message_hashes.add(h)
-                        new_messages.append(msg)
-                    else:
-                        logger.debug(f"Skipping duplicate visible message from {msg.get('sender','unknown')}: {msg.get('text','')[:80]}")
+                    # Initialize seen messages for this group only once when it is first opened.
+                    initial_messages = self._extract_messages()
+                    if not hasattr(self, "_baseline_group_messages"):
+                        self._baseline_group_messages = set()
+                    baseline_key = f"group:{group_name}"
+                    if baseline_key not in self._baseline_group_messages:
+                        for msg in initial_messages:
+                            self._seen_message_hashes.add(self._message_hash(msg))
+                        self._baseline_group_messages.add(baseline_key)
+                        logger.info(f"Loaded {len(initial_messages)} existing messages as baseline for group '{group_name}' (will not re-process).")
 
-                if new_messages:
-                    logger.info(f"Found {len(new_messages)} new message(s)")
+                    messages = self._extract_messages()
 
-                    for msg in new_messages:
-                        logger.info(f"New message from {msg['sender'] or 'unknown'}: {msg['text'][:100]}")
-                        logger.info(f"Parsing with {self.parser_source} parser")
-
-                        if self.parser is None:
-                            logger.info("No parser configured, skipping message parsing.")
-                            continue
-
-                        try:
-                            signal = self.parser.parse(msg["text"], msg.get("sender", ""))
-                        except Exception as exc:
-                            logger.error("Parser failed to parse message.", exc_info=True)
-                            if self.parser_source == "AI":
-                                logger.error("AI parser failure detected. Check API connectivity, key, model, or base URL settings.")
-                            continue
-
-                        if signal is None and self.parser_source == "AI":
-                            logger.warning("AI parser returned no signal for this message. This may indicate a low-confidence result or an issue with the AI/parser configuration.")
-
-                        if signal:
-                            logger.info(f"Signal detected: {signal.side} {signal.symbol} "
-                                       f"Entry: {signal.entry_min}-{signal.entry_max} "
-                                       f"SL: {signal.stop_loss} ({signal.sl_type}) "
-                                       f"TPs: {signal.take_profits} ({signal.tp_type})")
-
-                            written = self.writer.write_signal(signal)
-                            if written:
-                                logger.info(f"Signal written to file: {signal.signal_id}")
-                            else:
-                                logger.debug(f"Signal not written (duplicate or error): {signal.signal_id}")
+                    new_messages = []
+                    for msg in messages:
+                        h = self._message_hash(msg)
+                        if h not in self._seen_message_hashes:
+                            self._seen_message_hashes.add(h)
+                            new_messages.append(msg)
                         else:
-                            logger.debug(f"Not a signal: {msg['text'][:80]}")
+                            logger.debug(f"Skipping duplicate visible message from {msg.get('sender','unknown')} in group '{group_name}': {msg.get('text','')[:80]}")
 
-                time.sleep(self.poll_interval)
+                    if new_messages:
+                        logger.info(f"Found {len(new_messages)} new message(s) in group '{group_name}'")
+
+                        for msg in new_messages:
+                            logger.info(f"New message from {msg['sender'] or 'unknown'} in {group_name}: {msg['text'][:100]}")
+                            logger.info(f"Parsing with {self.parser_source} parser")
+
+                            if self.parser is None:
+                                logger.info("No parser configured, skipping message parsing.")
+                                continue
+
+                            try:
+                                signal = self.parser.parse(msg["text"], msg.get("sender", ""))
+                            except Exception as exc:
+                                logger.error("Parser failed to parse message.", exc_info=True)
+                                if self.parser_source == "AI":
+                                    logger.error("AI parser failure detected. Check API connectivity, key, model, or base URL settings.")
+                                continue
+
+                            if signal is None and self.parser_source == "AI":
+                                logger.warning("AI parser returned no signal for this message. This may indicate a low-confidence result or an issue with the AI/parser configuration.")
+
+                            if signal:
+                                logger.info(f"Signal detected: {signal.side} {signal.symbol} "
+                                           f"Entry: {signal.entry_min}-{signal.entry_max} "
+                                           f"SL: {signal.stop_loss} ({signal.sl_type}) "
+                                           f"TPs: {signal.take_profits} ({signal.tp_type})")
+
+                                written = self.writer.write_signal(signal)
+                                if written:
+                                    logger.info(f"Signal written to file: {signal.signal_id}")
+                                else:
+                                    logger.debug(f"Signal not written (duplicate or error): {signal.signal_id}")
+                            else:
+                                logger.debug(f"Not a signal: {msg['text'][:80]}")
+
+                    time.sleep(self.poll_interval)
 
             except KeyboardInterrupt:
                 logger.info("Monitoring stopped by user (Ctrl+C)")
@@ -745,7 +778,8 @@ class WhatsAppMonitor:
                 try:
                     self.driver.get(self.WHATSAPP_WEB_URL)
                     time.sleep(10)
-                    self._open_group_chat()
+                    if self.group_names:
+                        self._open_group_chat(self.group_names[0])
                 except Exception:
                     logger.error("Reconnection failed. Restarting monitor...")
                     self._take_screenshot("reconnect_failed.png")

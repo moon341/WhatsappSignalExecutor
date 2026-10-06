@@ -1,6 +1,7 @@
 {
   "whatsapp": {
     "group_name": "YOUR_GROUP_NAME_HERE",
+    "group_names": ["YOUR_GROUP_NAME_HERE", "SECOND_GROUP_NAME"],
     "chrome_profile_path": "C:\\WhatsAppSignalBot\\chrome-profile",
     "poll_interval_seconds": 2,
     "headless": false,
