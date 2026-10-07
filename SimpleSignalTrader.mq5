@@ -225,6 +225,7 @@ void ProcessSignalLine(const string line)
          else
             price = entryMin;
       }
+      
    }
    else if(entryMin > 0)
    {
