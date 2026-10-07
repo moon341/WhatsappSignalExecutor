@@ -210,20 +210,20 @@ void ProcessSignalLine(const string line)
       if(isBuy)
       {
          if(currentPrice > entryMax)
-            price = entryMin;
+            price = entryMax;
          else if(currentPrice >= entryMin && currentPrice <= entryMax)
-            price = entryMin;
+            price = entryMax;
          else
-            price = entryMin;
+            price = entryMax;
       }
       else
       {
          if(currentPrice < entryMin)
-            price = entryMax;
+            price = entryMin;
          else if(currentPrice >= entryMin && currentPrice <= entryMax)
-            price = entryMax;
+            price = entryMin;
          else
-            price = entryMax;
+            price = entryMin;
       }
    }
    else if(entryMin > 0)
