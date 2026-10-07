@@ -1,0 +1,39 @@
+{
+  "whatsapp": {
+    "group_name": "YOUR_GROUP_NAME_HERE",
+    "group_names": ["YOUR_GROUP_NAME_HERE", "SECOND_GROUP_NAME"],
+    "chrome_profile_path": "C:\\WhatsAppSignalBot\\chrome-profile",
+    "poll_interval_seconds": 2,
+    "headless": false,
+    "max_messages_per_scan": 20
+  },
+  "signal_file": {
+    "output_path": "C:\\Users\\YOUR_USERNAME\\AppData\\Roaming\\MetaQuotes\\Terminal\\YOUR_TERMINAL_ID\\MQL5\\Files\\signals.txt",
+    "processed_path": "C:\\Users\\YOUR_USERNAME\\AppData\\Roaming\\MetaQuotes\\Terminal\\YOUR_TERMINAL_ID\\MQL5\\Files\\signals.processed.txt",
+    "temp_suffix": ".tmp",
+    "max_signals_in_file": 100,
+    "encoding": "utf-8",
+    "clear_on_startup": true
+  },
+  "parser": {
+    "symbol_aliases": ["XAUUSD", "GOLD", "XAU/USD", "XAU", "GOLD SPOT"],
+    "default_symbol": "XAUUSD",
+    "ignore_case": true,
+    "min_confidence": 0.4,
+    "pip_value": 1.0,
+    "max_limit_sl_distance": 10.0,
+    "limit_sl_cap_distance": 7.0
+  },
+  "logging": {
+    "level": "INFO",
+    "log_file": "C:\\WhatsAppSignalBot\\signal_bridge.log",
+    "max_log_size_mb": 10,
+    "backup_count": 3
+  },
+  "ai_parser": {
+    "enabled": true,
+    "api_key": "YOUR_GROQ_API_KEY_HERE",
+    "model": "llama-3.3-70b-versatile",
+    "base_url": "https://api.groq.com/openai/v1"
+  }
+}
