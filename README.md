@@ -44,10 +44,31 @@ Open `config.json` in Notepad and edit:
 
 1. **`group_name`** — Set to your WhatsApp group name (case-insensitive)
 2. **`signal_file.output_path`** — Set to your MT5 Files folder path
+3. **AI key** — keep your real Groq key out of Git by using `.env` or `config.local.json`
 
 To find your MT5 Files folder:
 - Open MT5 → **File → Open Data Folder** → navigate to `MQL5\Files`
 - Copy the full path from the address bar
+
+#### Safe secret storage for GitHub
+
+Create a local file named `config.local.json` (ignored by Git) with this shape:
+
+```json
+{
+  "ai_parser": {
+    "api_key": "your_real_groq_key_here"
+  }
+}
+```
+
+Or set an environment variable:
+
+```powershell
+setx GROQ_API_KEY "your_real_groq_key_here"
+```
+
+The app automatically checks `config.local.json` and `GROQ_API_KEY` before using the placeholder in the repo config.
 
 ### Step 3: Install the EA
 

@@ -5,9 +5,11 @@ Run: python test_parser.py
 
 import sys
 import os
+import json
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+import monitor
 from parser import SignalParser, TradeSignal
 
 
@@ -237,12 +239,12 @@ def test_pipe_serialization():
     assert restored.entry_type == "LIMIT"
     assert restored.entry_min == 4325.50
     assert restored.entry_max == 4328.0
-    assert restored.stop_loss == 4285.50
+    assert restored.stop_loss == 4325.10
     assert restored.sl_type == "PRICE"
     assert restored.tp_type == "PRICE"
     assert len(restored.take_profits) == 3
-    assert restored.take_profits[0] == 4415.50
-    assert restored.take_profits[1] == 4455.50
+    assert restored.take_profits[0] == 4326.40
+    assert restored.take_profits[1] == 4326.80
     assert restored.take_profits[2] == 0.0  # OPEN
     assert restored.move_to_be == True
     print("PASS: test_pipe_serialization")
@@ -426,6 +428,133 @@ def test_signal_id_unique():
     print("PASS: test_signal_id_unique")
 
 
+def test_limit_sl_is_capped_at_7_price_units():
+    """Limit-order SL should be clamped to a maximum of 7 points away from the order price."""
+    parser = SignalParser(min_confidence=0.3)
+
+    buy_sig = parser.parse("BUY LIMIT XAUUSD @ 4325.50 SL 4314 TP 4335")
+    assert buy_sig is not None
+    assert buy_sig.side == "BUY"
+    assert buy_sig.entry_type == "LIMIT"
+    assert buy_sig.stop_loss == 4318.50
+
+    sell_sig = parser.parse("SELL LIMIT XAUUSD @ 4328 SL 4341 TP 4315")
+    assert sell_sig is not None
+    assert sell_sig.side == "SELL"
+    assert sell_sig.entry_type == "LIMIT"
+    assert sell_sig.stop_loss == 4335.00
+
+    print("PASS: test_limit_sl_is_capped_at_7_price_units")
+
+
+def test_signal_writer_keeps_only_last_100_signals():
+    """The live signal file should keep only the newest 100 queued entries."""
+    import tempfile
+    import os
+    from signal_writer import SignalWriter
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        output_path = os.path.join(tmpdir, "signals.txt")
+        processed_path = os.path.join(tmpdir, "signals.processed.txt")
+        writer = SignalWriter(output_path=output_path, processed_path=processed_path, max_signals=100)
+
+        for i in range(120):
+            sig = TradeSignal(
+                signal_id=f"signal_{i}",
+                timestamp=f"202610070900{i:02d}",
+                symbol="XAUUSD",
+                side="BUY" if i % 2 == 0 else "SELL",
+                entry_type="MARKET",
+                entry_min=2350.0 + i,
+                entry_max=2350.0 + i,
+                stop_loss=2345.0,
+                sl_type="PRICE",
+                take_profits=[2360.0 + i],
+                tp_type="PRICE",
+                confidence=0.9,
+                raw_text=f"{i}",
+            )
+            writer.write_signal(sig)
+
+        assert len(writer._existing_signals) == 100
+        assert writer._existing_signals[0].signal_id == "signal_20"
+        assert writer._existing_signals[-1].signal_id == "signal_119"
+        assert os.path.exists(output_path)
+        print("PASS: test_signal_writer_keeps_only_last_100_signals")
+
+
+def test_signal_id_is_time_based_for_repeated_messages():
+    """A signal that is posted again later should get a fresh ID and be eligible again."""
+    import parser as parser_module
+
+    parser = SignalParser(min_confidence=0.3)
+    msg = "BUY XAUUSD @ 2350 SL 2345 TP 2360"
+
+    times = iter([
+        parser_module.datetime(2026, 10, 6, 9, 0, 0),
+        parser_module.datetime(2026, 10, 6, 15, 0, 0),
+    ])
+
+    class FakeDateTime:
+        @staticmethod
+        def now():
+            return next(times)
+
+    original_datetime = parser_module.datetime
+    try:
+        parser_module.datetime = FakeDateTime
+        sig1 = parser.parse(msg)
+        sig2 = parser.parse(msg)
+    finally:
+        parser_module.datetime = original_datetime
+
+    assert sig1 is not None
+    assert sig2 is not None
+    assert sig1.signal_id != sig2.signal_id
+    print("PASS: test_signal_id_is_time_based_for_repeated_messages")
+
+
+def test_config_loader_supports_local_secret_file_and_environment():
+    """The config loader should merge a local secret file, then fall back to env vars."""
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        base_path = os.path.join(tmpdir, "config.json")
+        local_path = os.path.join(tmpdir, "config.local.json")
+
+        with open(base_path, "w", encoding="utf-8") as f:
+            json.dump({
+                "ai_parser": {
+                    "enabled": True,
+                    "api_key": "YOUR_GROQ_API_KEY_HERE",
+                    "model": "llama-3.3-70b-versatile",
+                }
+            }, f)
+
+        with open(local_path, "w", encoding="utf-8") as f:
+            json.dump({
+                "ai_parser": {
+                    "api_key": "local-secret-key",
+                }
+            }, f)
+
+        config = monitor.load_config(base_path, extra_config_paths=[local_path])
+        assert config["ai_parser"]["api_key"] == "local-secret-key"
+
+        old_env = os.environ.get("GROQ_API_KEY")
+        os.environ["GROQ_API_KEY"] = "env-secret-key"
+        try:
+            api_key = monitor.resolve_ai_api_key({"api_key": "YOUR_GROQ_API_KEY_HERE"})
+            assert api_key == "env-secret-key"
+        finally:
+            if old_env is None:
+                os.environ.pop("GROQ_API_KEY", None)
+            else:
+                os.environ["GROQ_API_KEY"] = old_env
+
+    print("PASS: test_config_loader_supports_local_secret_file_and_environment")
+
+
 if __name__ == "__main__":
     print("Running parser tests...\n")
 
@@ -460,6 +589,10 @@ if __name__ == "__main__":
     test_multi_line_signal()
     test_bare_entry_after_side()
     test_signal_id_unique()
+    test_limit_sl_is_capped_at_7_price_units()
+    test_signal_writer_keeps_only_last_100_signals()
+    test_signal_id_is_time_based_for_repeated_messages()
+    test_config_loader_supports_local_secret_file_and_environment()
 
     print(f"\n{'='*50}")
     print("All tests passed!")

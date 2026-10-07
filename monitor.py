@@ -85,6 +85,32 @@ def setup_logging(config):
 logger = logging.getLogger(__name__)
 
 
+def _deep_merge(base, override):
+    """Merge dictionaries recursively so local overrides can replace nested config values."""
+    result = dict(base or {})
+    for key, value in (override or {}).items():
+        if isinstance(value, dict) and isinstance(result.get(key), dict):
+            result[key] = _deep_merge(result[key], value)
+        else:
+            result[key] = value
+    return result
+
+
+def resolve_ai_api_key(ai_config=None):
+    """Return the AI API key from explicit config, a local secret file, or environment variables."""
+    ai_config = ai_config or {}
+    configured = ai_config.get("api_key", "")
+    if configured and configured not in ("", "YOUR_GROQ_API_KEY_HERE"):
+        return configured
+
+    for env_var in ("GROQ_API_KEY", "AI_API_KEY", "OPENAI_API_KEY"):
+        env_value = os.getenv(env_var, "").strip()
+        if env_value and env_value not in ("YOUR_GROQ_API_KEY_HERE", "YOUR_API_KEY_HERE"):
+            return env_value
+
+    return configured
+
+
 # ---------------------------------------------------------------------------
 # WhatsApp Web Monitor
 # ---------------------------------------------------------------------------
@@ -184,6 +210,8 @@ class WhatsAppMonitor:
 
         sf_config = config["signal_file"]
         self.signal_output_path = sf_config["output_path"]
+        self.signal_processed_path = sf_config.get("processed_path", os.path.splitext(self.signal_output_path)[0] + ".processed.txt")
+        self.clear_signal_queue_on_startup = bool(sf_config.get("clear_on_startup", True))
 
         p_config = config.get("parser", {})
         self.parser_enabled = p_config.get("enabled", True)
@@ -193,15 +221,18 @@ class WhatsAppMonitor:
             default_symbol=p_config.get("default_symbol", "XAUUSD"),
             min_confidence=p_config.get("min_confidence", 0.4),
             pip_value=p_config.get("pip_value", 1.0),
+            max_limit_sl_distance=p_config.get("max_limit_sl_distance", 10.0),
+            limit_sl_cap_distance=p_config.get("limit_sl_cap_distance", 7.0),
         )
 
         # AI parser (if configured and parsing is enabled)
         ai_config = config.get("ai_parser", {})
+        resolved_api_key = resolve_ai_api_key(ai_config)
         if self.parser_enabled:
-            if ai_config.get("enabled", False) and AI_AVAILABLE and ai_config.get("api_key", "") not in ("", "YOUR_GROQ_API_KEY_HERE"):
+            if ai_config.get("enabled", False) and AI_AVAILABLE and resolved_api_key not in ("", "YOUR_GROQ_API_KEY_HERE"):
                 try:
                     self.parser = AISignalParser(
-                        api_key=ai_config.get("api_key", "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"),
+                        api_key=resolved_api_key,
                         model=ai_config.get("model", "llama-3.3-70b-versatile"),
                         base_url=ai_config.get("base_url", "https://api.groq.com/openai/v1"),
                         fallback_parser=regex_parser,
@@ -218,9 +249,9 @@ class WhatsAppMonitor:
                 if ai_config.get("enabled", False) and not AI_AVAILABLE:
                     logger.warning("AI parser enabled in config, but the optional ai_parser module is not installed. Using regex parser.")
                     logger.warning("Install the AI parser package or remove ai_parser.enabled from config.")
-                elif ai_config.get("enabled", False) and ai_config.get("api_key", "") in ("", "YOUR_GROQ_API_KEY_HERE"):
+                elif ai_config.get("enabled", False) and resolved_api_key in ("", "YOUR_GROQ_API_KEY_HERE"):
                     logger.warning("AI parser enabled but no valid API key provided. Using regex parser.")
-                    logger.warning("Get a free API key at https://console.groq.com/keys")
+                    logger.warning("Set GROQ_API_KEY or create config.local.json with ai_parser.api_key.")
                 else:
                     logger.info("Using regex parser (set ai_parser.enabled=true in config to use AI)")
         else:
@@ -233,6 +264,7 @@ class WhatsAppMonitor:
             max_signals=sf_config.get("max_signals_in_file", 50),
             temp_suffix=sf_config.get("temp_suffix", ".tmp"),
             encoding=sf_config.get("encoding", "utf-8"),
+            processed_path=self.signal_processed_path,
         )
 
         self.driver = None
@@ -511,7 +543,7 @@ class WhatsAppMonitor:
             logger.error("No WhatsApp group configured.")
             return False
 
-        logger.info(f"Opening group chat: {target_group}")
+        #logger.info(f"Opening group chat: {target_group}")
 
         # Wait for chat list to be present
         chat_list_found = False
@@ -538,7 +570,7 @@ class WhatsAppMonitor:
         while not group_found and attempts < max_attempts:
             attempts += 1
             entries = self._find_elements_by_selectors(self.CHAT_ENTRY_SELECTORS)
-            logger.info(f"Found {len(entries)} chat entries. Searching for '{target_group}'...")
+            #logger.info(f"Found {len(entries)} chat entries. Searching for '{target_group}'...")
 
             for entry in entries:
                 try:
@@ -552,7 +584,7 @@ class WhatsAppMonitor:
                                 time.sleep(0.5)
                                 entry.click()
                                 group_found = True
-                                logger.info(f"Found and opened group: {title}")
+                                #logger.info(f"Found and opened group: {title}")
                                 break
                         except (NoSuchElementException, StaleElementReferenceException):
                             continue
@@ -697,6 +729,12 @@ class WhatsAppMonitor:
         logger.info(f"Signal file: {self.signal_output_path}")
         logger.info(f"Monitoring groups: {', '.join(self.group_names) if self.group_names else 'NONE'}")
 
+        if self.clear_signal_queue_on_startup:
+            logger.info("Clearing stale queued signal file before startup baseline is loaded.")
+            self.writer.clear()
+        else:
+            logger.info("Startup queue clearing disabled by config; keeping existing queued signals.")
+
         if not self.group_names:
             logger.error("No WhatsApp groups configured. Add group_name or group_names to config.json.")
             return
@@ -807,20 +845,33 @@ class WhatsAppMonitor:
 # Main entry point
 # ---------------------------------------------------------------------------
 
-def load_config(config_path="config.json") -> dict:
-    with open(config_path, "r", encoding="utf-8") as f:
-        return json.load(f)
+def load_config(config_path="config.json", extra_config_paths=None) -> dict:
+    """Load config.json, then overlay additional local secret files. This allows a public repo to keep the main config template checked in while storing real secrets locally."""
+    merged = {}
+    paths = [config_path]
+    if extra_config_paths:
+        paths.extend(extra_config_paths)
+
+    for path in paths:
+        if not path or not os.path.exists(path):
+            continue
+        with open(path, "r", encoding="utf-8") as f:
+            merged = _deep_merge(merged, json.load(f))
+
+    return merged
 
 
 def main():
     config_path = sys.argv[1] if len(sys.argv) > 1 else "config.json"
+    local_config_path = os.path.join(os.path.dirname(os.path.abspath(config_path)), "config.local.json") if os.path.dirname(os.path.abspath(config_path)) else "config.local.json"
 
     if not os.path.exists(config_path):
         print(f"Config file not found: {config_path}")
         print("Copy config.example.json to config.json and edit it.")
         sys.exit(1)
 
-    config = load_config(config_path)
+    extra_local_paths = [local_config_path] if os.path.exists(local_config_path) else []
+    config = load_config(config_path, extra_local_paths)
     setup_logging(config)
 
     monitor = WhatsAppMonitor(config)

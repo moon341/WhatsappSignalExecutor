@@ -82,6 +82,41 @@ class TradeSignal:
             return base_price - pip_amount if is_stop_loss else base_price + pip_amount
         return base_price + pip_amount if is_stop_loss else base_price - pip_amount
 
+    def apply_limit_sl_cap(self, max_distance: float = 10.0, cap_distance: float = 7.0):
+        """If a limit-order SL is too far from the trigger price, clamp it to the configured cap."""
+        if self.entry_type.upper() != "LIMIT":
+            return
+        if self.stop_loss <= 0:
+            return
+
+        order_price = self.entry_min if self.side.upper() == "BUY" else self.entry_max
+        if not order_price:
+            order_price = self.entry_min or self.entry_max
+        if not order_price:
+            return
+
+        sl_price = self.stop_loss
+        if self.sl_type.upper() == "PIPS":
+            sl_price = self._pips_to_price(self.stop_loss, is_stop_loss=True)
+
+        distance = abs(sl_price - order_price)
+        if distance <= max_distance:
+            return
+
+        capped_stop_loss = order_price - cap_distance if self.side.upper() == "BUY" else order_price + cap_distance
+        logger.info(
+            "Clamped limit-order SL from %.5f to %.5f (distance %.5f > max %.5f, cap %.5f) for %s %s",
+            sl_price,
+            capped_stop_loss,
+            distance,
+            max_distance,
+            cap_distance,
+            self.side,
+            self.entry_type,
+        )
+        self.stop_loss = capped_stop_loss
+        self.sl_type = "PRICE"
+
     def to_pipe_string(self):
         """Serialize to pipe-delimited format for MT5 EA consumption.
 
@@ -162,9 +197,13 @@ class SignalParser:
     DEFAULT_PIP_VALUE = 1.0  # 1 pip = $1.00 for XAUUSD
 
     def __init__(self, symbol_aliases=None, default_symbol="XAUUSD",
-                 min_confidence=0.4, pip_value=None):
+                 min_confidence=0.4, pip_value=None,
+                 max_limit_sl_distance: float = 10.0,
+                 limit_sl_cap_distance: float = 7.0):
         self.default_symbol = default_symbol
         self.min_confidence = min_confidence
+        self.max_limit_sl_distance = float(max_limit_sl_distance)
+        self.limit_sl_cap_distance = float(limit_sl_cap_distance)
         if symbol_aliases:
             self.SYMBOL_ALIASES = symbol_aliases
         if pip_value is not None:
@@ -514,14 +553,12 @@ class SignalParser:
             logger.debug(f"Rejected (no SL/TP): {raw[:80]}")
             return None
 
-        # Generate deterministic signal ID from sender and raw text so repeated
-        # parsing of the same message does not create duplicate signals.
+        # Generate a signal ID that changes when the same message is re-posted later.
+        # A raw-text-only hash would permanently block valid re-entries after hours.
         import hashlib
-        msg_hash = hashlib.md5(f"{sender}:{raw}".encode("utf-8")).hexdigest()[:16]
-        signal_id = msg_hash
-
-        # Timestamp for the parsed signal (used in output and serialization)
-        timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+        timestamp = datetime.now().strftime("%Y%m%d%H%M%S%f")
+        msg_hash = hashlib.md5(f"{sender}:{raw}:{timestamp}".encode("utf-8")).hexdigest()[:16]
+        signal_id = f"{timestamp}_{msg_hash}"
 
         signal = TradeSignal(
             signal_id=signal_id,
@@ -540,6 +577,10 @@ class SignalParser:
             source_sender=sender,
             timeframe=timeframe,
             raw_text=raw,
+        )
+        signal.apply_limit_sl_cap(
+            max_distance=self.max_limit_sl_distance,
+            cap_distance=self.limit_sl_cap_distance,
         )
 
         if confidence >= self.min_confidence:

@@ -21,23 +21,39 @@ logger = logging.getLogger(__name__)
 class SignalWriter:
     """Writes trade signals to a file atomically with rollback safety."""
 
-    def __init__(self, output_path: str, max_signals: int = 50,
+    def __init__(self, output_path: str, max_signals: int = 100,
                  temp_suffix: str = ".tmp", encoding: str = "utf-8",
-                 max_retries: int = 3, retry_delay: float = 0.5):
+                 max_retries: int = 3, retry_delay: float = 0.5,
+                 processed_path: str = None):
         self.output_path = output_path
         self.max_signals = max_signals
         self.temp_suffix = temp_suffix
         self.encoding = encoding
         self.max_retries = max_retries
         self.retry_delay = retry_delay
+        self.processed_path = processed_path or os.path.splitext(output_path)[0] + ".processed.txt"
         self._processed_ids = set()
         self._existing_signals = []
 
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        os.makedirs(os.path.dirname(self.processed_path) or ".", exist_ok=True)
         self._load_existing()
 
     def _load_existing(self):
-        """Load existing signals from file for dedup tracking."""
+        """Load existing signals from the live queue and processed archive for dedup tracking."""
+        if os.path.exists(self.processed_path):
+            try:
+                with open(self.processed_path, "r", encoding=self.encoding) as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        parts = line.split("|")
+                        if len(parts) >= 1 and parts[0]:
+                            self._processed_ids.add(parts[0])
+            except Exception as e:
+                logger.warning(f"Could not load processed archive: {e}")
+
         if not os.path.exists(self.output_path):
             return
         try:
@@ -87,6 +103,68 @@ class SignalWriter:
                 self._existing_signals.remove(signal)
             logger.error(f"Failed to write signal {signal.signal_id} after retries. Rolled back.")
             return False
+
+    def mark_signal_processed(self, signal_id: str) -> bool:
+        """Archive a processed signal ID without deleting the active queue file in-place.
+
+        This avoids a race where the monitor is writing a new signal while the EA is
+        deleting a stale file. Instead, we atomically rewrite the queue to remove the
+        entries belonging to this signal_id and append the ID to a processed archive.
+        """
+        if not signal_id or not signal_id.strip():
+            return False
+
+        processed_id = signal_id.strip()
+        if processed_id in self._processed_ids:
+            return True
+
+        remaining = []
+        for sig in self._existing_signals:
+            if sig.signal_id != processed_id:
+                remaining.append(sig)
+
+        if len(remaining) != len(self._existing_signals):
+            self._existing_signals = remaining
+            if self._flush_with_retries():
+                self._processed_ids.add(processed_id)
+                self._archive_processed_id(processed_id)
+                return True
+
+        self._processed_ids.add(processed_id)
+        self._archive_processed_id(processed_id)
+        return True
+
+    def _archive_processed_id(self, signal_id: str) -> None:
+        """Append a processed signal ID to an archive file atomically."""
+        if not signal_id or not signal_id.strip():
+            return
+
+        dir_path = os.path.dirname(self.processed_path)
+        if dir_path:
+            os.makedirs(dir_path, exist_ok=True)
+
+        tmp_path = None
+        try:
+            fd, tmp_path = tempfile.mkstemp(
+                dir=dir_path or ".",
+                suffix=self.temp_suffix,
+                prefix="processed_",
+            )
+            with os.fdopen(fd, "w", encoding=self.encoding) as f:
+                if os.path.exists(self.processed_path):
+                    with open(self.processed_path, "r", encoding=self.encoding) as existing:
+                        for line in existing:
+                            if line.strip():
+                                f.write(line)
+                f.write(f"{signal_id}\n")
+            os.replace(tmp_path, self.processed_path)
+        except Exception as e:
+            logger.warning(f"Could not archive processed signal {signal_id}: {e}")
+            if tmp_path and os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except Exception:
+                    pass
 
     def write_signals(self, signals: List[TradeSignal]) -> int:
         """Write multiple signals. Returns count of newly written signals."""
@@ -180,11 +258,14 @@ class SignalWriter:
         return result
 
     def clear(self):
-        """Clear all signals."""
+        """Clear all signals while leaving an empty file behind for the consumer."""
         self._existing_signals = []
         self._processed_ids = set()
         try:
-            if os.path.exists(self.output_path):
-                os.remove(self.output_path)
+            dir_path = os.path.dirname(self.output_path)
+            if dir_path:
+                os.makedirs(dir_path, exist_ok=True)
+            with open(self.output_path, "w", encoding=self.encoding) as f:
+                f.write("")
         except Exception as e:
-            logger.warning(f"Could not remove signal file: {e}")
+            logger.warning(f"Could not clear signal file: {e}")

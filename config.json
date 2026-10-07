@@ -9,16 +9,20 @@
   },
   "signal_file": {
     "output_path": "C:\\Users\\noman\\AppData\\Roaming\\MetaQuotes\\Terminal\\D0E8209F77C8CF37AD8BF550E51FF075\\MQL5\\Files\\signals.txt",
+    "processed_path": "C:\\Users\\noman\\AppData\\Roaming\\MetaQuotes\\Terminal\\D0E8209F77C8CF37AD8BF550E51FF075\\MQL5\\Files\\signals.processed.txt",
     "temp_suffix": ".tmp",
-    "max_signals_in_file": 50,
-    "encoding": "cp1252"
+    "max_signals_in_file": 100,
+    "encoding": "cp1252",
+    "clear_on_startup": true
   },
   "parser": {
     "symbol_aliases": ["XAUUSD", "GOLD", "XAU/USD", "XAU", "GOLD SPOT"],
     "default_symbol": "XAUUSD",
     "ignore_case": true,
     "min_confidence": 0.4,
-    "pip_value": 1.0
+    "pip_value": 1.0,
+    "max_limit_sl_distance": 10.0,
+    "limit_sl_cap_distance": 7.0
   },
   "logging": {
     "level": "INFO",
@@ -28,7 +32,7 @@
   },
   "ai_parser": {
     "enabled": true,
-    "api_key": "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",
+    "api_key": "YOUR_GROQ_API_KEY_HERE",
     "model": "llama-3.3-70b-versatile",
     "base_url": "https://api.groq.com/openai/v1"
   }

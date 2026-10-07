@@ -16,12 +16,41 @@ import sys
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
-def load_config(config_path=None):
+def _deep_merge(base, override):
+    result = dict(base or {})
+    for key, value in (override or {}).items():
+        if isinstance(value, dict) and isinstance(result.get(key), dict):
+            result[key] = _deep_merge(result[key], value)
+        else:
+            result[key] = value
+    return result
+
+
+def resolve_ai_api_key(ai_config=None):
+    ai_config = ai_config or {}
+    configured = ai_config.get("api_key", "")
+    if configured and configured not in ("", "YOUR_GROQ_API_KEY_HERE"):
+        return configured
+
+    for env_var in ("GROQ_API_KEY", "AI_API_KEY", "OPENAI_API_KEY"):
+        env_value = os.getenv(env_var, "").strip()
+        if env_value and env_value not in ("YOUR_GROQ_API_KEY_HERE", "YOUR_API_KEY_HERE"):
+            return env_value
+
+    return configured
+
+
+def load_config(config_path=None, extra_config_paths=None):
     config_path = config_path or os.path.join(SCRIPT_DIR, "config.json")
-    if not os.path.exists(config_path):
+    merged = {}
+    for path in [config_path] + (extra_config_paths or []):
+        if not path or not os.path.exists(path):
+            continue
+        with open(path, "r", encoding="utf-8") as f:
+            merged = _deep_merge(merged, json.load(f))
+    if not merged:
         raise FileNotFoundError(f"Config file not found: {config_path}")
-    with open(config_path, "r", encoding="utf-8") as f:
-        return json.load(f)
+    return merged
 
 
 def main():
@@ -45,9 +74,9 @@ def main():
         print("ERROR: ai_parser.enabled is false in config.json. Enable AI parsing to run this test.")
         sys.exit(1)
 
-    api_key = ai_config.get("api_key", "")
+    api_key = resolve_ai_api_key(ai_config)
     if not api_key or api_key == "YOUR_GROQ_API_KEY_HERE":
-        print("ERROR: ai_parser.api_key is not configured in config.json.")
+        print("ERROR: ai_parser.api_key is not configured. Set GROQ_API_KEY or add config.local.json.")
         sys.exit(1)
 
     try:
