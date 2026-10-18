@@ -71,7 +71,7 @@ class TradeSignal:
         if pip_value == 0:
             return 0.0
 
-        pip_amount = pip_value * 0.01
+        pip_amount = pip_value * 0.1 #pipvalue PiptoPriceRatio
         base_price = self.entry_min if self.side == "BUY" else self.entry_max
         if not base_price:
             base_price = self.entry_min or self.entry_max

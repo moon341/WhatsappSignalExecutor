@@ -201,7 +201,9 @@ void ProcessSignalLine(const string line)
    if(tp <= 0)
       tp = entryMax;
 
-   double currentPrice = isBuy ? SymbolInfoDouble(_Symbol, SYMBOL_ASK) : SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double currentPrice = isBuy ? ask : bid;
    double price = currentPrice;
    bool isLimit = (entryType == "LIMIT");
 
@@ -209,24 +211,14 @@ void ProcessSignalLine(const string line)
    {
       if(isBuy)
       {
-         if(currentPrice > entryMax)
-            price = entryMax;
-         else if(currentPrice >= entryMin && currentPrice <= entryMax)
-            price = entryMax;
-         else
-            price = entryMax;
+         // BUY LIMIT should use the lower bound of the zone, which is usually below current market.
+         price = entryMax;
       }
       else
       {
-         if(currentPrice < entryMin)
-            price = entryMin;
-         else if(currentPrice >= entryMin && currentPrice <= entryMax)
-            price = entryMin;
-         else
-            price = entryMin;
+         // SELL LIMIT should use the upper bound of the zone, which is usually above current market.
+         price = entryMin;
       }
-
-      
    }
    else if(entryMin > 0)
    {
@@ -239,10 +231,20 @@ void ProcessSignalLine(const string line)
          " entryType=", entryType,
          " entryMin=", DoubleToString(entryMin, Digits()),
          " entryMax=", DoubleToString(entryMax, Digits()),
+         " bid=", DoubleToString(bid, Digits()),
+         " ask=", DoubleToString(ask, Digits()),
          " sl=", DoubleToString(sl, Digits()),
          " tp=", DoubleToString(tp, Digits()),
-         " orderPrice=", DoubleToString(price, Digits()),
+         " chosenLimitPrice=", DoubleToString(price, Digits()),
          " volume=", DoubleToString(volume, 2));
+
+   if(isLimit && price > 0)
+   {
+      if(isBuy && price >= ask)
+         Print("SimpleSignalTrader: WARNING - BUY LIMIT price is not below current ask. This can trigger invalid price.");
+      if(isSell && price <= bid)
+         Print("SimpleSignalTrader: WARNING - SELL LIMIT price is not above current bid. This can trigger invalid price.");
+   }
 
    if(!EnableTrading)
    {
