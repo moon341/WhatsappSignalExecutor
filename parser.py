@@ -45,6 +45,7 @@ class TradeSignal:
     source_sender: str = ""
     timeframe: str = ""         # "H1", "M30", etc.
     raw_text: str = ""
+    pip_to_price_ratio: float = 0.01
 
     def to_dict(self):
         return {
@@ -71,7 +72,7 @@ class TradeSignal:
         if pip_value == 0:
             return 0.0
 
-        pip_amount = pip_value * 0.1 #pipvalue PiptoPriceRatio
+        pip_amount = pip_value * self.pip_to_price_ratio
         base_price = self.entry_min if self.side == "BUY" else self.entry_max
         if not base_price:
             base_price = self.entry_min or self.entry_max
@@ -199,11 +200,13 @@ class SignalParser:
     def __init__(self, symbol_aliases=None, default_symbol="XAUUSD",
                  min_confidence=0.4, pip_value=None,
                  max_limit_sl_distance: float = 10.0,
-                 limit_sl_cap_distance: float = 7.0):
+                 limit_sl_cap_distance: float = 7.0,
+                 pip_to_price_ratio: float = 0.01):
         self.default_symbol = default_symbol
         self.min_confidence = min_confidence
         self.max_limit_sl_distance = float(max_limit_sl_distance)
         self.limit_sl_cap_distance = float(limit_sl_cap_distance)
+        self.pip_to_price_ratio = float(pip_to_price_ratio)
         if symbol_aliases:
             self.SYMBOL_ALIASES = symbol_aliases
         if pip_value is not None:
@@ -553,11 +556,11 @@ class SignalParser:
             logger.debug(f"Rejected (no SL/TP): {raw[:80]}")
             return None
 
-        # Generate a signal ID that changes when the same message is re-posted later.
-        # A raw-text-only hash would permanently block valid re-entries after hours.
+        # Use a timestamp-based signal ID so each message gets a stable identity
+        # when it is first processed, while still avoiding collisions in the same millisecond.
         import hashlib
         timestamp = datetime.now().strftime("%Y%m%d%H%M%S%f")
-        msg_hash = hashlib.md5(f"{sender}:{raw}:{timestamp}".encode("utf-8")).hexdigest()[:16]
+        msg_hash = hashlib.md5(f"{sender}:{raw}".encode("utf-8")).hexdigest()[:12]
         signal_id = f"{timestamp}_{msg_hash}"
 
         signal = TradeSignal(
@@ -577,6 +580,7 @@ class SignalParser:
             source_sender=sender,
             timeframe=timeframe,
             raw_text=raw,
+            pip_to_price_ratio=self.pip_to_price_ratio,
         )
         signal.apply_limit_sl_cap(
             max_distance=self.max_limit_sl_distance,

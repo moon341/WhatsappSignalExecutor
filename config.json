@@ -21,8 +21,13 @@
     "ignore_case": true,
     "min_confidence": 0.4,
     "pip_value": 1.0,
+    "pip_to_price_ratio": 0.01,
     "max_limit_sl_distance": 10.0,
     "limit_sl_cap_distance": 7.0
+  },
+  "trailing_stop": {
+    "enabled": true,
+    "price": 5.00
   },
   "logging": {
     "level": "INFO",

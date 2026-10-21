@@ -223,6 +223,7 @@ class WhatsAppMonitor:
             pip_value=p_config.get("pip_value", 1.0),
             max_limit_sl_distance=p_config.get("max_limit_sl_distance", 10.0),
             limit_sl_cap_distance=p_config.get("limit_sl_cap_distance", 7.0),
+            pip_to_price_ratio=p_config.get("pip_to_price_ratio", 0.01),
         )
 
         # AI parser (if configured and parsing is enabled)
@@ -735,6 +736,12 @@ class WhatsAppMonitor:
         else:
             logger.info("Startup queue clearing disabled by config; keeping existing queued signals.")
 
+        # Ignore all existing visible chat history. Only messages that arrive after startup
+        # are considered. Messages already on screen when the monitor opens the group are
+        # treated as a startup baseline and never reprocessed.
+        self._seen_message_hashes = set()
+        self._startup_baseline_hashes = {}
+
         if not self.group_names:
             logger.error("No WhatsApp groups configured. Add group_name or group_names to config.json.")
             return
@@ -746,27 +753,25 @@ class WhatsAppMonitor:
                         logger.warning(f"Skipping group {group_name} because it could not be opened.")
                         continue
 
-                    # Initialize seen messages for this group only once when it is first opened.
-                    initial_messages = self._extract_messages()
-                    if not hasattr(self, "_baseline_group_messages"):
-                        self._baseline_group_messages = set()
                     baseline_key = f"group:{group_name}"
-                    if baseline_key not in self._baseline_group_messages:
-                        for msg in initial_messages:
-                            self._seen_message_hashes.add(self._message_hash(msg))
-                        self._baseline_group_messages.add(baseline_key)
-                        logger.info(f"Loaded {len(initial_messages)} existing messages as baseline for group '{group_name}' (will not re-process).")
+                    if baseline_key not in self._startup_baseline_hashes:
+                        self._startup_baseline_hashes[baseline_key] = set()
+                        for msg in self._extract_messages():
+                            self._startup_baseline_hashes[baseline_key].add(self._message_hash(msg))
+                        logger.info(f"Startup baseline loaded for group '{group_name}': {len(self._startup_baseline_hashes[baseline_key])} historical messages ignored.")
 
                     messages = self._extract_messages()
 
                     new_messages = []
                     for msg in messages:
                         h = self._message_hash(msg)
+                        if h in self._startup_baseline_hashes.get(baseline_key, set()):
+                            continue
                         if h not in self._seen_message_hashes:
                             self._seen_message_hashes.add(h)
                             new_messages.append(msg)
                         else:
-                            logger.debug(f"Skipping duplicate visible message from {msg.get('sender','unknown')} in group '{group_name}': {msg.get('text','')[:80]}")
+                            logger.debug(f"Skipping duplicate message from {msg.get('sender','unknown')} in group '{group_name}': {msg.get('text','')[:80]}")
 
                     if new_messages:
                         logger.info(f"Found {len(new_messages)} new message(s) in group '{group_name}'")

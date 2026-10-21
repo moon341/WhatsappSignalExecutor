@@ -95,6 +95,7 @@ def main():
             default_symbol=config.get("parser", {}).get("default_symbol", "XAUUSD"),
             min_confidence=config.get("parser", {}).get("min_confidence", 0.4),
             pip_value=config.get("parser", {}).get("pip_value", 1.0),
+            pip_to_price_ratio=config.get("parser", {}).get("pip_to_price_ratio", 0.01),
         )
     except Exception:
         fallback_parser = None

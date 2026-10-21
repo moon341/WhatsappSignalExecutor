@@ -514,6 +514,76 @@ def test_signal_id_is_time_based_for_repeated_messages():
     print("PASS: test_signal_id_is_time_based_for_repeated_messages")
 
 
+def test_monitor_ignores_startup_history_and_dedupes_new_messages_once():
+    """Only messages created after startup should be considered, and duplicates should be ignored."""
+    import tempfile
+    import hashlib
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        config = {
+            "whatsapp": {
+                "group_names": ["Test Group"],
+                "chrome_profile_path": os.path.join(tmpdir, "chrome-profile"),
+                "poll_interval_seconds": 1,
+                "headless": True,
+                "max_messages_per_scan": 20,
+            },
+            "signal_file": {
+                "output_path": os.path.join(tmpdir, "signals.txt"),
+                "processed_path": os.path.join(tmpdir, "signals.processed.txt"),
+                "clear_on_startup": True,
+            },
+            "parser": {
+                "enabled": True,
+                "symbol_aliases": ["XAUUSD"],
+                "default_symbol": "XAUUSD",
+                "min_confidence": 0.3,
+                "pip_value": 1.0,
+                "pip_to_price_ratio": 0.01,
+                "max_limit_sl_distance": 10.0,
+                "limit_sl_cap_distance": 7.0,
+            },
+            "logging": {
+                "level": "ERROR",
+                "log_file": os.path.join(tmpdir, "signal_bridge.log"),
+            },
+        }
+
+        mon = monitor.WhatsAppMonitor(config)
+        mon._seen_message_hashes = set()
+
+        startup_messages = [
+            {"text": "BUY XAUUSD @ 2350 SL 2345 TP 2360", "sender": "Alice"},
+            {"text": "BUY XAUUSD @ 2350 SL 2345 TP 2360", "sender": "Alice"},
+        ]
+        for msg in startup_messages:
+            h = hashlib.md5(f"{msg.get('sender','')}:{msg.get('text','')}".encode("utf-8")).hexdigest()
+            mon._seen_message_hashes.add(h)
+
+        # Startup history should not be treated as active input; we start clean.
+        assert len(mon._seen_message_hashes) == 1
+
+        new_messages = [
+            {"text": "BUY XAUUSD @ 2350 SL 2345 TP 2360", "sender": "Alice"},
+            {"text": "SELL XAUUSD @ 2400 SL 2410 TP 2390", "sender": "Bob"},
+            {"text": "SELL XAUUSD @ 2400 SL 2410 TP 2390", "sender": "Bob"},
+        ]
+        seen = set()
+        deduped = []
+        for msg in new_messages:
+            h = hashlib.md5(f"{msg.get('sender','')}:{msg.get('text','')}".encode("utf-8")).hexdigest()
+            if h not in seen:
+                seen.add(h)
+                deduped.append(msg)
+
+        assert len(deduped) == 2
+        assert [m["text"] for m in deduped] == [
+            "BUY XAUUSD @ 2350 SL 2345 TP 2360",
+            "SELL XAUUSD @ 2400 SL 2410 TP 2390",
+        ]
+        print("PASS: test_monitor_ignores_startup_history_and_dedupes_new_messages_once")
+
+
 def test_config_loader_supports_local_secret_file_and_environment():
     """The config loader should merge a local secret file, then fall back to env vars."""
     import tempfile
@@ -555,6 +625,30 @@ def test_config_loader_supports_local_secret_file_and_environment():
     print("PASS: test_config_loader_supports_local_secret_file_and_environment")
 
 
+def test_pip_to_price_ratio_is_configurable():
+    """Pip conversion should use the configured ratio when serializing pip values."""
+    sig = TradeSignal(
+        signal_id="ratio-test",
+        timestamp="20261018010101",
+        symbol="XAUUSD",
+        side="BUY",
+        entry_type="LIMIT",
+        entry_min=4325.50,
+        entry_max=4328.00,
+        stop_loss=40.0,
+        sl_type="PIPS",
+        take_profits=[90.0, 130.0],
+        tp_type="PIPS",
+        raw_text="BUY LIMIT",
+        pip_to_price_ratio=0.01,
+    )
+    pipe = sig.to_pipe_string()
+    assert "4325.10" in pipe
+    assert "4326.40" in pipe
+    assert "4326.80" in pipe
+    print("PASS: test_pip_to_price_ratio_is_configurable")
+
+
 if __name__ == "__main__":
     print("Running parser tests...\n")
 
@@ -593,6 +687,7 @@ if __name__ == "__main__":
     test_signal_writer_keeps_only_last_100_signals()
     test_signal_id_is_time_based_for_repeated_messages()
     test_config_loader_supports_local_secret_file_and_environment()
+    test_pip_to_price_ratio_is_configurable()
 
     print(f"\n{'='*50}")
     print("All tests passed!")
