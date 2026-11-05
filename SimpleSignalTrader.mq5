@@ -8,14 +8,34 @@
 
 #include <Trade\Trade.mqh>
 
+enum ENUM_TRADE_MODE
+{
+   TRADE_MODE_TRAILING = 0,   // Case 1: trailing SL + BE + TP shifting
+   TRADE_MODE_BREAK_EVEN = 1, // Case 2: BE only, no trailing, fixed TP1
+   TRADE_MODE_STEPWISE = 2    // Case 3: stepwise SL with TP switching
+};
+
+enum ENUM_STOP_LOSS_STRATEGY
+{
+   STOP_LOSS_STRATEGY_TRAILING = 0,
+   STOP_LOSS_STRATEGY_STEPWISE = 1
+};
+
 input string SignalFileName = "signals.txt"; // relative to MQL5/Files or full path
-input bool   EnableTrading   = false;          // true to actually send orders
-input bool   EnableTrailingStop = true;        // update active trades with a trailing SL
+input string TradeSymbol = "XAUUSD";          // symbol to trade; leave blank to use current chart symbol
+input bool   EnableTrading   = true;          // true to actually send orders
+input bool   EnableTrailingStop = true;        // legacy toggle: trailing stop enabled in trailing mode
+input bool   EnableTpShift = true;             // enable TP advancement to the next TP level
+input ENUM_TRADE_MODE TradeMode = TRADE_MODE_TRAILING; // active stop/TP management mode
+input ENUM_STOP_LOSS_STRATEGY StopLossStrategy = STOP_LOSS_STRATEGY_TRAILING; // stop-loss strategy
 input double LotSize         = 0.01;
 input int    MagicNumber     = 12345;
 input int    PollSeconds     = 1;              // check every second
 input int    PendingOrderExpiryMinutes = 120; // 0 disables expiry; pending orders older than this are removed
-input double TrailingStopPrice = 1.00;        // fixed gold price distance in XAUUSD price units (0 disables trailing)
+input double TPShiftDistance = 1.00;           // shift TP to the next level when current TP is within this price distance
+input double TrailingStopPrice = 7.00;        // fixed gold price distance in XAUUSD price units (0 disables trailing)
+input double BreakEvenDistance = 7.00;         // distance required before moving SL to break-even
+input double BreakEvenStepDistance = 1.00;      // extra BE step after the initial BE move
 
 CTrade trade;
 string  g_lastFileContent = "";
@@ -73,14 +93,16 @@ void SaveTpLevelsForOrder(const long ticket, const string tpField)
 
 void AdvanceTpIfCloseToMarket(const ulong ticket, const ENUM_POSITION_TYPE posType, const double currentStop, const double bid, const double ask)
 {
-   if(ticket == 0)
+   if(ticket == 0 || !EnableTpShift)
       return;
 
-   long positionOrigin = PositionGetInteger(POSITION_IDENTIFIER);
-   if(positionOrigin <= 0)
+   if(TPShiftDistance <= 0)
       return;
 
-   int idx = FindTpRecordIndex(positionOrigin);
+   if(!PositionSelectByTicket(ticket))
+      return;
+
+   int idx = FindTpRecordIndex((long)ticket);
    if(idx < 0)
       return;
 
@@ -99,7 +121,7 @@ void AdvanceTpIfCloseToMarket(const ulong ticket, const ENUM_POSITION_TYPE posTy
    double activeTarget = StringToDouble(tpParts[activeIndex]);
    double currentPrice = (posType == POSITION_TYPE_BUY) ? bid : ask;
    double distance = MathAbs(currentPrice - activeTarget);
-   if(distance > 2.0)
+   if(distance > TPShiftDistance)
       return;
 
    if(activeIndex + 1 >= tpCount)
@@ -115,6 +137,204 @@ void AdvanceTpIfCloseToMarket(const ulong ticket, const ENUM_POSITION_TYPE posTy
             " to=", DoubleToString(nextTarget, Digits()),
             " market=", DoubleToString(currentPrice, Digits()),
             " distance=", DoubleToString(distance, Digits()));
+   }
+}
+
+void UpdateTpProgressForAllPositions()
+{
+   string tradeSymbol = GetTradeSymbol();
+   int total = PositionsTotal();
+   for(int i = total - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0)
+         continue;
+      if(!PositionSelectByTicket(ticket))
+         continue;
+      if(PositionGetString(POSITION_SYMBOL) != tradeSymbol)
+         continue;
+
+      ENUM_POSITION_TYPE posType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+      double currentStop = PositionGetDouble(POSITION_SL);
+      double bid = SymbolInfoDouble(tradeSymbol, SYMBOL_BID);
+      double ask = SymbolInfoDouble(tradeSymbol, SYMBOL_ASK);
+      AdvanceTpIfCloseToMarket(ticket, posType, currentStop, bid, ask);
+   }
+}
+
+string GetTradeSymbol()
+{
+   if(StringLen(TradeSymbol) > 0)
+      return(TradeSymbol);
+   return(_Symbol);
+}
+
+void UpdateBreakEvenStops()
+{
+   string tradeSymbol = GetTradeSymbol();
+   int total = PositionsTotal();
+   for(int i = total - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0)
+         continue;
+      if(!PositionSelectByTicket(ticket))
+         continue;
+      if(PositionGetString(POSITION_SYMBOL) != tradeSymbol)
+         continue;
+
+      ENUM_POSITION_TYPE posType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+      double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+      double currentStop = PositionGetDouble(POSITION_SL);
+      double takeProfit = PositionGetDouble(POSITION_TP);
+      double bid = SymbolInfoDouble(tradeSymbol, SYMBOL_BID);
+      double ask = SymbolInfoDouble(tradeSymbol, SYMBOL_ASK);
+      double currentPrice = (posType == POSITION_TYPE_BUY) ? bid : ask;
+      double profitDistance = (posType == POSITION_TYPE_BUY) ? currentPrice - openPrice : openPrice - currentPrice;
+      if(profitDistance <= 0)
+         continue;
+
+      double newStop = currentStop;
+      if(BreakEvenDistance > 0 && profitDistance >= BreakEvenDistance)
+      {
+         double bePrice = openPrice;
+         if(posType == POSITION_TYPE_BUY)
+         {
+            if(currentStop == 0 || bePrice > currentStop)
+               newStop = bePrice;
+         }
+         else if(currentStop == 0 || bePrice < currentStop)
+         {
+            newStop = bePrice;
+         }
+      }
+
+      if(BreakEvenStepDistance > 0 && profitDistance >= BreakEvenDistance + BreakEvenStepDistance)
+      {
+         double stepPrice = openPrice + ((posType == POSITION_TYPE_BUY) ? BreakEvenStepDistance : -BreakEvenStepDistance);
+         if(posType == POSITION_TYPE_BUY)
+            newStop = MathMax(newStop, stepPrice);
+         else
+            newStop = MathMin(newStop, stepPrice);
+      }
+
+      if(newStop > 0 && newStop != currentStop)
+      {
+         bool ok = trade.PositionModify(ticket, newStop, takeProfit);
+         Print("SimpleSignalTrader: BE update ticket=", ticket,
+               " oldStop=", DoubleToString(currentStop, Digits()),
+               " newStop=", DoubleToString(newStop, Digits()),
+               " success=", ok);
+      }
+   }
+}
+
+void UpdateStepwiseStopLossManagement()
+{
+   string tradeSymbol = GetTradeSymbol();
+   int total = PositionsTotal();
+   for(int i = total - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0)
+         continue;
+      if(!PositionSelectByTicket(ticket))
+         continue;
+      if(PositionGetString(POSITION_SYMBOL) != tradeSymbol)
+         continue;
+
+      ENUM_POSITION_TYPE posType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+      double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+      double currentStop = PositionGetDouble(POSITION_SL);
+      double takeProfit = PositionGetDouble(POSITION_TP);
+      double bid = SymbolInfoDouble(tradeSymbol, SYMBOL_BID);
+      double ask = SymbolInfoDouble(tradeSymbol, SYMBOL_ASK);
+      double currentPrice = (posType == POSITION_TYPE_BUY) ? bid : ask;
+      double profitDistance = (posType == POSITION_TYPE_BUY) ? currentPrice - openPrice : openPrice - currentPrice;
+      double newStop = currentStop;
+
+      if(BreakEvenDistance > 0 && profitDistance >= BreakEvenDistance)
+      {
+         double bePrice = openPrice;
+         if(posType == POSITION_TYPE_BUY)
+         {
+            if(currentStop == 0 || bePrice > currentStop)
+               newStop = bePrice;
+         }
+         else if(currentStop == 0 || bePrice < currentStop)
+         {
+            newStop = bePrice;
+         }
+      }
+
+      if(BreakEvenStepDistance > 0 && profitDistance >= BreakEvenDistance + BreakEvenStepDistance)
+      {
+         double stepPrice = openPrice + ((posType == POSITION_TYPE_BUY) ? BreakEvenStepDistance : -BreakEvenStepDistance);
+         if(posType == POSITION_TYPE_BUY)
+            newStop = MathMax(newStop, stepPrice);
+         else
+            newStop = MathMin(newStop, stepPrice);
+      }
+
+      int idx = FindTpRecordIndex((long)ticket);
+      if(idx >= 0)
+      {
+         string tpParts[];
+         int tpCount = StringSplit(g_tpLevelLists[idx], '/', tpParts);
+         if(tpCount > 1)
+         {
+            int activeIndex = g_tpIndexes[idx];
+            if(activeIndex > 0 && activeIndex < tpCount)
+            {
+               double targetLevel = StringToDouble(tpParts[activeIndex - 1]);
+               if(posType == POSITION_TYPE_BUY)
+               {
+                  if(currentStop == 0 || targetLevel > currentStop)
+                     newStop = MathMax(newStop, targetLevel);
+               }
+               else if(currentStop == 0 || targetLevel < currentStop)
+               {
+                  newStop = MathMin(newStop, targetLevel);
+               }
+            }
+         }
+      }
+
+      if(newStop > 0 && newStop != currentStop)
+      {
+         bool ok = trade.PositionModify(ticket, newStop, takeProfit);
+         Print("SimpleSignalTrader: stepwise BE+SL update ticket=", ticket,
+               " oldStop=", DoubleToString(currentStop, Digits()),
+               " newStop=", DoubleToString(newStop, Digits()),
+               " targetLevel=", DoubleToString((newStop == openPrice ? openPrice : newStop), Digits()),
+               " success=", ok);
+      }
+   }
+}
+
+void UpdatePositionManagement()
+{
+   if(TradeMode != TRADE_MODE_BREAK_EVEN && EnableTpShift)
+      UpdateTpProgressForAllPositions();
+
+   if(TradeMode == TRADE_MODE_TRAILING)
+   {
+      if(EnableTrailingStop && StopLossStrategy == STOP_LOSS_STRATEGY_TRAILING)
+         UpdateTrailingStops();
+      return;
+   }
+
+   if(TradeMode == TRADE_MODE_BREAK_EVEN)
+   {
+      UpdateBreakEvenStops();
+      return;
+   }
+
+   if(TradeMode == TRADE_MODE_STEPWISE)
+   {
+      if(StopLossStrategy == STOP_LOSS_STRATEGY_STEPWISE)
+         UpdateStepwiseStopLossManagement();
+      return;
    }
 }
 
@@ -250,6 +470,7 @@ void UpdateTrailingStops()
    if(!EnableTrailingStop)
       return;
 
+   string tradeSymbol = GetTradeSymbol();
    int total = PositionsTotal();
    for(int i = total - 1; i >= 0; i--)
    {
@@ -259,13 +480,15 @@ void UpdateTrailingStops()
 
       if(!PositionSelectByTicket(ticket))
          continue;
+      if(PositionGetString(POSITION_SYMBOL) != tradeSymbol)
+         continue;
 
       ENUM_POSITION_TYPE posType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
       double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
       double currentStop = PositionGetDouble(POSITION_SL);
       double takeProfit = PositionGetDouble(POSITION_TP);
-      double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-      double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+      double bid = SymbolInfoDouble(tradeSymbol, SYMBOL_BID);
+      double ask = SymbolInfoDouble(tradeSymbol, SYMBOL_ASK);
       double trailDistance = TrailingStopPrice;
       double newStop = currentStop;
 
@@ -298,8 +521,6 @@ void UpdateTrailingStops()
                " newStop=", DoubleToString(newStop, Digits()),
                " success=", ok);
       }
-
-      AdvanceTpIfCloseToMarket(ticket, posType, currentStop, bid, ask);
    }
 }
 
@@ -349,7 +570,7 @@ void OnTimer()
    string content = ReadSignalFileContent(SignalFileName);
    if(StringLen(content) == 0)
    {
-      Print("SimpleSignalTrader: no signal content read");
+      // Print("SimpleSignalTrader: no signal content read");
       return;
    }
 
@@ -360,8 +581,7 @@ void OnTimer()
       ProcessSignalFile(content);
    }
 
-   if(EnableTrailingStop)
-      UpdateTrailingStops();
+   UpdatePositionManagement();
 }
 
 //+------------------------------------------------------------------+
@@ -468,16 +688,25 @@ void ProcessSignalLine(const string line)
       return;
    }
 
+   string tradeSymbol = GetTradeSymbol();
+   if(StringLen(symbol) > 0 && StringLen(tradeSymbol) > 0 && symbol != tradeSymbol)
+   {
+      Print("SimpleSignalTrader: symbol mismatch, configured trade symbol=", tradeSymbol, " signal symbol=", symbol, " skipping.");
+      return;
+   }
+
    double volume = LotSize > 0 ? LotSize : 0.01;
    double entryMin = StringToDouble(parts[5]);
    double entryMax = StringToDouble(parts[6]);
    double sl = StringToDouble(parts[7]);
    double tp = 0.0;
-   Print("entryType=", parts[4], " upper=", StringToUpper(parts[4]));
    string entryType = parts[4];
-   Print("entryType=", entryType);
+   string normalizedEntryType = "LIMIT";
+   if(StringLen(entryType) == 0)
+      entryType = "LIMIT";
+   Print("entryType=", entryType, " normalized=", normalizedEntryType);
    if(entryMin <= 0)
-      entryMin = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+      entryMin = SymbolInfoDouble(tradeSymbol, SYMBOL_ASK);
    if(entryMax <= 0)
       entryMax = entryMin;
    if(sl <= 0)
@@ -499,11 +728,12 @@ void ProcessSignalLine(const string line)
    if(tp <= 0)
       tp = entryMax;
 
-   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double ask = SymbolInfoDouble(tradeSymbol, SYMBOL_ASK);
+   double bid = SymbolInfoDouble(tradeSymbol, SYMBOL_BID);
    double currentPrice = isBuy ? ask : bid;
    double price = currentPrice;
-   bool isLimit = (entryType == "LIMIT");
+   bool isLimit = true;
+   bool isMarket = false;
 
    if(entryMin > 0 && entryMax > 0 && isLimit)
    {
@@ -557,25 +787,21 @@ void ProcessSignalLine(const string line)
    }
 
    bool result = false;
-   Print("trade type isLimit=", (string)isLimit, " entryMin=", entryMin, " entryMax=", entryMax);
+   Print("trade type isLimit=", (string)isLimit, " entryMin=", entryMin, " entryMax=", entryMax, " entryType=", normalizedEntryType);
+   Print("SimpleSignalTrader: pre-order check symbol=", tradeSymbol,
+         " autoTrading=", TerminalInfoInteger(TERMINAL_TRADE_ALLOWED),
+         " expertAllowed=", MQLInfoInteger(MQL_TRADE_ALLOWED),
+         " symbolTradeMode=", (int)SymbolInfoInteger(tradeSymbol, SYMBOL_TRADE_MODE),
+         " symbolSelect=", SymbolSelect(tradeSymbol, true));
    if(isLimit && entryMin > 0 && entryMax > 0)
    {
-      Print("if(isLimit && entryMin > 0 && entryMax > 0): true");
+      Print("placing LIMIT order from signal");
+      datetime expiry = TimeCurrent() + (PendingOrderExpiryMinutes > 0 ? PendingOrderExpiryMinutes * 60 : 24 * 60 * 60);
       if(isBuy)
-         result = trade.BuyLimit(volume, price, _Symbol, sl, tp, ORDER_TIME_GTC, 0, "SimpleSignalTrader");
+         result = trade.BuyLimit(volume, price, tradeSymbol, sl, tp, ORDER_TIME_GTC, expiry, "SimpleSignalTrader");
       else
-         result = trade.SellLimit(volume, price, _Symbol, sl, tp, ORDER_TIME_GTC, 0, "SimpleSignalTrader");
+         result = trade.SellLimit(volume, price, tradeSymbol, sl, tp, ORDER_TIME_GTC, expiry, "SimpleSignalTrader");
    }
-   //else if(isBuy)
-   //   {
-   //   Print("else if(isBuy)");
-   //   result = trade.Buy(volume, _Symbol, price, sl, tp, "SimpleSignalTrader");
-   //   }
-   //else
-   //   {
-   //   Print("else");
-   //   result = trade.Sell(volume, _Symbol, price, sl, tp, "SimpleSignalTrader");
-   //   }
    if(result)
    {
       ulong placedTicket = trade.ResultOrder();
