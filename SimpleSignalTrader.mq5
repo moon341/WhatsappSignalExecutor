@@ -26,6 +26,7 @@ input string TradeSymbol = "XAUUSD";          // symbol to trade; leave blank to
 input bool   EnableTrading   = true;          // true to actually send orders
 input bool   EnableTrailingStop = true;        // legacy toggle: trailing stop enabled in trailing mode
 input bool   EnableTpShift = true;             // enable TP advancement to the next TP level
+input bool   UseMarketFallback = false;        // if no valid limit exists, use market entry instead of skipping
 input ENUM_TRADE_MODE TradeMode = TRADE_MODE_TRAILING; // active stop/TP management mode
 input ENUM_STOP_LOSS_STRATEGY StopLossStrategy = STOP_LOSS_STRATEGY_TRAILING; // stop-loss strategy
 input double LotSize         = 0.01;
@@ -224,6 +225,10 @@ void UpdateBreakEvenStops()
          Print("SimpleSignalTrader: BE update ticket=", ticket,
                " oldStop=", DoubleToString(currentStop, Digits()),
                " newStop=", DoubleToString(newStop, Digits()),
+               " open=", DoubleToString(openPrice, Digits()),
+               " current=", DoubleToString(currentPrice, Digits()),
+               " profitDistance=", DoubleToString(profitDistance, Digits()),
+               " required=", DoubleToString(BreakEvenDistance, Digits()),
                " success=", ok);
       }
    }
@@ -314,6 +319,11 @@ void UpdateStepwiseStopLossManagement()
 
 void UpdatePositionManagement()
 {
+   // Break-even must be monitored for every active trade, even if the EA has just
+   // started or the signal file is empty. This logic only depends on current price vs.
+   // the open price, not on saved TP arrays or prior signal history.
+   UpdateBreakEvenStops();
+
    if(TradeMode != TRADE_MODE_BREAK_EVEN && EnableTpShift)
       UpdateTpProgressForAllPositions();
 
@@ -326,7 +336,6 @@ void UpdatePositionManagement()
 
    if(TradeMode == TRADE_MODE_BREAK_EVEN)
    {
-      UpdateBreakEvenStops();
       return;
    }
 
@@ -454,6 +463,15 @@ int OnInit()
    trade.SetExpertMagicNumber(MagicNumber);
    EventSetTimer(timerSeconds);
    Print("SimpleSignalTrader: watching file -> ", SignalFileName, " timerSeconds=", timerSeconds);
+
+   // Always rescan active positions on startup so already-open trades are evaluated
+   // for BE movement, even when there are no new queued signals.
+   if(PositionsTotal() > 0)
+   {
+      Print("SimpleSignalTrader: startup scan active positions, total=", PositionsTotal());
+      UpdatePositionManagement();
+   }
+
    return(INIT_SUCCEEDED);
 }
 
@@ -567,6 +585,11 @@ void OnTimer()
 {
    RemoveExpiredPendingOrders();
 
+   // Always keep monitoring existing positions, even when the signal file is empty.
+   // This matters after an EA property change/restart: the trade remains active but the
+   // signal queue may be empty until a new signal arrives.
+   UpdatePositionManagement();
+
    string content = ReadSignalFileContent(SignalFileName);
    if(StringLen(content) == 0)
    {
@@ -580,8 +603,6 @@ void OnTimer()
       g_lastFileContent = content;
       ProcessSignalFile(content);
    }
-
-   UpdatePositionManagement();
 }
 
 //+------------------------------------------------------------------+
@@ -734,18 +755,30 @@ void ProcessSignalLine(const string line)
    double price = currentPrice;
    bool isLimit = true;
    bool isMarket = false;
+   double minTick = SymbolInfoDouble(tradeSymbol, SYMBOL_POINT);
+   if(minTick <= 0)
+      minTick = 0.01; // safe fallback for XAUUSD / gold-style price resolution
+   double validPrice = 0.0;
 
    if(entryMin > 0 && entryMax > 0 && isLimit)
    {
       if(isBuy)
       {
-         // BUY LIMIT should use the lower bound of the zone, which is usually below current market.
-         price = entryMax;
+         // BUY: choose the highest valid price inside the signal range while staying below the current ask.
+         double upperBound = MathMin(entryMax, ask - minTick);
+         if(upperBound > entryMin)
+            price = upperBound;
+         else
+            price = 0.0;
       }
       else
       {
-         // SELL LIMIT should use the upper bound of the zone, which is usually above current market.
-         price = entryMin;
+         // SELL: choose the lowest valid price inside the signal range while staying above the current bid.
+         double lowerBound = MathMax(entryMin, bid + minTick);
+         if(lowerBound < entryMax)
+            price = lowerBound;
+         else
+            price = 0.0;
       }
    }
    else if(entryMin > 0)
@@ -774,6 +807,17 @@ void ProcessSignalLine(const string line)
          Print("SimpleSignalTrader: WARNING - SELL LIMIT price is not above current bid. This can trigger invalid price.");
    }
 
+   if(isLimit && price <= 0)
+   {
+      Print("SimpleSignalTrader: no valid limit price for this market condition. Signal range was entryMin=",
+            DoubleToString(entryMin, Digits()), " entryMax=",
+            DoubleToString(entryMax, Digits()), " ask=",
+            DoubleToString(ask, Digits()), " bid=",
+            DoubleToString(bid, Digits()), " side=", side,
+            ". Skipping order to avoid Exness invalid limit rejection.");
+      return;
+   }
+
    if(!EnableTrading)
    {
       Print("SimpleSignalTrader: trading disabled, skipping order execution.");
@@ -793,15 +837,44 @@ void ProcessSignalLine(const string line)
          " expertAllowed=", MQLInfoInteger(MQL_TRADE_ALLOWED),
          " symbolTradeMode=", (int)SymbolInfoInteger(tradeSymbol, SYMBOL_TRADE_MODE),
          " symbolSelect=", SymbolSelect(tradeSymbol, true));
+
    if(isLimit && entryMin > 0 && entryMax > 0)
    {
-      Print("placing LIMIT order from signal");
-      datetime expiry = TimeCurrent() + (PendingOrderExpiryMinutes > 0 ? PendingOrderExpiryMinutes * 60 : 24 * 60 * 60);
-      if(isBuy)
-         result = trade.BuyLimit(volume, price, tradeSymbol, sl, tp, ORDER_TIME_GTC, expiry, "SimpleSignalTrader");
+      if(price <= 0)
+      {
+         if(UseMarketFallback)
+         {
+            Print("SimpleSignalTrader: no valid limit price inside signal band. Using market fallback side=", side, " ask=", DoubleToString(ask, Digits()), " bid=", DoubleToString(bid, Digits()));
+            isLimit = false;
+            isMarket = true;
+         }
+         else
+         {
+            Print("SimpleSignalTrader: no valid limit price inside signal band. Skipping order side=", side,
+                  " entryMin=", DoubleToString(entryMin, Digits()), " entryMax=", DoubleToString(entryMax, Digits()),
+                  " ask=", DoubleToString(ask, Digits()), " bid=", DoubleToString(bid, Digits()));
+            return;
+         }
+      }
       else
-         result = trade.SellLimit(volume, price, tradeSymbol, sl, tp, ORDER_TIME_GTC, expiry, "SimpleSignalTrader");
+      {
+         Print("placing LIMIT order from signal, price=", DoubleToString(price, Digits()));
+         datetime expiry = TimeCurrent() + (PendingOrderExpiryMinutes > 0 ? PendingOrderExpiryMinutes * 60 : 24 * 60 * 60);
+         if(isBuy)
+            result = trade.BuyLimit(volume, price, tradeSymbol, sl, tp, ORDER_TIME_GTC, expiry, "SimpleSignalTrader");
+         else
+            result = trade.SellLimit(volume, price, tradeSymbol, sl, tp, ORDER_TIME_GTC, expiry, "SimpleSignalTrader");
+      }
    }
+
+   if(isMarket && !result)
+   {
+      if(isBuy)
+         result = trade.Buy(volume, tradeSymbol, 0, sl, tp, "SimpleSignalTrader");
+      else
+         result = trade.Sell(volume, tradeSymbol, 0, sl, tp, "SimpleSignalTrader");
+   }
+
    if(result)
    {
       ulong placedTicket = trade.ResultOrder();

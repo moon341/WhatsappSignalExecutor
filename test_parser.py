@@ -13,6 +13,13 @@ import monitor
 from parser import SignalParser, TradeSignal
 
 
+def test_browser_memory_parse_helper():
+    """Memory guard should convert raw process bytes into MB for threshold checks."""
+    assert monitor.WhatsAppMonitor._parse_memory_mb("2147483648") == 2048.0
+    assert monitor.WhatsAppMonitor._parse_memory_mb("1536 MB") == 1536.0
+    assert monitor.WhatsAppMonitor._parse_memory_mb("1.5 GB") == 1536.0
+
+
 def test_real_sample_1():
     """Test real signal sample 1: BUY LIMIT with pips TP/SL."""
     parser = SignalParser(min_confidence=0.3)

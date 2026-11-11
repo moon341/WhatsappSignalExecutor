@@ -5,7 +5,10 @@
     "chrome_profile_path": "C:\\WhatsAppSignalBot\\chrome-profile",
     "poll_interval_seconds": 2,
     "headless": false,
-    "max_messages_per_scan": 20
+    "max_messages_per_scan": 20,
+    "browser_memory_log_interval_seconds": 60,
+    "browser_restart_memory_mb": 2500,
+    "browser_restart_interval_seconds": 7200
   },
   "signal_file": {
     "output_path": "C:\\Users\\YOUR_USERNAME\\AppData\\Roaming\\MetaQuotes\\Terminal\\YOUR_TERMINAL_ID\\MQL5\\Files\\signals.txt",

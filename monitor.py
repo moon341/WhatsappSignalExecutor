@@ -20,6 +20,7 @@ import logging
 import os
 import sys
 import hashlib
+import subprocess
 from datetime import datetime
 
 from selenium import webdriver
@@ -207,6 +208,11 @@ class WhatsAppMonitor:
         self.poll_interval = wa_config.get("poll_interval_seconds", 2)
         self.headless = wa_config.get("headless", False)
         self.max_messages = wa_config.get("max_messages_per_scan", 20)
+        self.browser_restart_memory_mb = float(wa_config.get("browser_restart_memory_mb", 2500))
+        self.browser_restart_interval_seconds = int(wa_config.get("browser_restart_interval_seconds", 7200))
+        self.browser_memory_log_interval_seconds = int(wa_config.get("browser_memory_log_interval_seconds", 60))
+        self._last_browser_restart = time.time()
+        self._last_memory_log = 0.0
 
         sf_config = config["signal_file"]
         self.signal_output_path = sf_config["output_path"]
@@ -475,6 +481,113 @@ class WhatsAppMonitor:
 
         return True
 
+    @staticmethod
+    def _parse_memory_mb(raw_value):
+        """Convert bytes or common human-readable units into MB for threshold checks."""
+        if raw_value is None:
+            return 0.0
+
+        text = str(raw_value).strip()
+        if not text:
+            return 0.0
+
+        text = text.replace(",", "")
+        lower = text.lower()
+
+        unit_map = {
+            "kb": 1024.0,
+            "mb": 1024.0 * 1024.0,
+            "gb": 1024.0 * 1024.0 * 1024.0,
+            "tb": 1024.0 * 1024.0 * 1024.0 * 1024.0,
+        }
+
+        for suffix, multiplier in unit_map.items():
+            if lower.endswith(suffix):
+                try:
+                    return float(text[:-len(suffix)]) * multiplier / (1024.0 * 1024.0)
+                except ValueError:
+                    return 0.0
+
+        try:
+            value = float(text)
+        except ValueError:
+            return 0.0
+
+        if value > 1024 * 1024:
+            return value / (1024.0 * 1024.0)
+        return value / 1024.0
+
+    def _get_chrome_memory_mb(self):
+        """Return the combined RSS/working set of Chrome-related processes in MB."""
+        if os.name != "nt":
+            return 0.0
+
+        try:
+            command = [
+                "powershell",
+                "-NoProfile",
+                "-Command",
+                "(Get-CimInstance Win32_Process | Where-Object { $_.Name -match 'chrome|chromium' } | Measure-Object -Property WorkingSetSize -Sum | Select-Object -ExpandProperty Sum)"
+            ]
+            result = subprocess.run(command, capture_output=True, text=True, timeout=20, check=False)
+            if result.returncode != 0:
+                logger.debug("Chrome memory probe failed: %s", result.stderr.strip())
+                return 0.0
+            return self._parse_memory_mb(result.stdout.strip())
+        except Exception as exc:
+            logger.debug("Chrome memory probe exception: %s", exc)
+            return 0.0
+
+    def _log_browser_memory(self):
+        """Emit periodic memory logs while the monitor is running."""
+        now = time.time()
+        if self.browser_memory_log_interval_seconds <= 0:
+            return
+        if now - self._last_memory_log < self.browser_memory_log_interval_seconds:
+            return
+
+        self._last_memory_log = now
+        memory_mb = self._get_chrome_memory_mb()
+        # Suppress noisy browser memory logging to keep monitor output clean.
+
+    def _should_restart_browser(self):
+        """Restart the browser before it gets close to the memory ceiling or after a long runtime."""
+        if self.driver is None:
+            return False
+
+        if self.browser_restart_memory_mb > 0:
+            memory_mb = self._get_chrome_memory_mb()
+            if memory_mb > 0 and memory_mb >= self.browser_restart_memory_mb:
+                logger.warning(
+                    "Chrome memory usage reached %.1f MB (limit %.1f MB); restarting browser to avoid lockups.",
+                    memory_mb,
+                    self.browser_restart_memory_mb,
+                )
+                return True
+
+        if self.browser_restart_interval_seconds > 0:
+            elapsed = time.time() - self._last_browser_restart
+            if elapsed >= self.browser_restart_interval_seconds:
+                logger.warning(
+                    "Browser has been open for %.0f seconds; restarting to avoid memory buildup.",
+                    elapsed,
+                )
+                return True
+
+        return False
+
+    def _restart_browser(self):
+        """Close and reopen the Chrome session without losing the persistent profile login."""
+        logger.info("Restarting WhatsApp Chrome browser session...")
+        self.shutdown()
+        self._last_browser_restart = time.time()
+        self._logged_in = False
+        if self.start():
+            logger.info("Chrome browser restarted successfully.")
+            return True
+        logger.error("Chrome browser restart failed.")
+        return False
+
     def _wait_for_login(self, timeout=300):
         """
         Wait for the user to scan the QR code and log in.
@@ -595,8 +708,7 @@ class WhatsAppMonitor:
                     continue
 
             if not group_found:
-                # Try using the search box
-                logger.info(f"Group not in visible chats. Trying search...")
+                # Try using the search box without noisy console output.
                 try:
                     search_box = self._find_element_by_selectors(self.SEARCH_BOX_SELECTORS, timeout=5)
                     if search_box:
@@ -625,7 +737,6 @@ class WhatsAppMonitor:
                                         if title and target_group.lower() in title.lower():
                                             entry.click()
                                             group_found = True
-                                            logger.info(f"Found group via search: {title}")
                                             break
                                     except (NoSuchElementException, StaleElementReferenceException):
                                         continue
@@ -748,6 +859,11 @@ class WhatsAppMonitor:
 
         while True:
             try:
+                self._log_browser_memory()
+                if self._should_restart_browser():
+                    self._restart_browser()
+                    continue
+
                 for group_name in self.group_names:
                     if not self._open_group_chat(group_name):
                         logger.warning(f"Skipping group {group_name} because it could not be opened.")
